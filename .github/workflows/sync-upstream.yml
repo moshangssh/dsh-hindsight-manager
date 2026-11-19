@@ -1,0 +1,78 @@
+name: Sync Hindsight upstream
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: hindsight-upstream-${{ github.event.pull_request.number || 'sync' }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+      - name: Synchronize upstream and apply DSH patch
+        if: github.event_name != 'pull_request'
+        run: npm run sync:upstream
+      - name: Read sync result
+        id: result
+        run: |
+          if git diff --quiet; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+          node --input-type=module <<'JS' >> "$GITHUB_OUTPUT"
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const config = JSON.parse(readFileSync('upstream-sync.json'));
+          const upstream = JSON.parse(readFileSync(join(config.directory, 'upstream-package.json')));
+          console.log(`version=${upstream.version}`);
+          JS
+      - name: Install the tested DSH host
+        if: github.event_name == 'pull_request' || steps.result.outputs.changed == 'true'
+        run: |
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import { readFileSync } from 'node:fs';
+          const { engines } = JSON.parse(readFileSync('package.json'));
+          execFileSync('npm', ['install', '--global', `@deepseek-ai/dsh@${engines.dsh}`], { stdio: 'inherit' });
+          JS
+      - name: Check, test and pack
+        if: github.event_name == 'pull_request' || steps.result.outputs.changed == 'true'
+        run: |
+          npm run check
+          npm test
+          npm pack
+      - name: Upload the tested package
+        if: github.event_name == 'pull_request' || steps.result.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-hindsight-manager
+          path: '*.tgz'
+      - name: Create or update the upstream PR
+        if: github.event_name != 'pull_request' && steps.result.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ github.token }}
+          branch: automation/hindsight-upstream
+          commit-message: 'chore: sync Hindsight ${{ steps.result.outputs.version }}'
+          title: 'chore: sync Hindsight ${{ steps.result.outputs.version }}'
+          body: |
+            Updates the vendored Hindsight runtime and companion files, retaining the local DSH patch.
+
+            Validation: syntax checks, DSH regression tests, and package loading tests passed.
+            A test installation package is available in this workflow run's artifacts.
+
+            Review upstream behavior and server compatibility before merging. Set the manager's release version before distributing a release.

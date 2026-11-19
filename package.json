@@ -37,8 +37,9 @@
     }
   },
   "scripts": {
+    "sync:upstream": "node scripts/sync-upstream.mjs",
     "test": "node --test --test-isolation=none tests/*.test.mjs",
-    "check": "node --check index.js && node --check client.js && node --check vendor/hindsight-coding-agents/dist/dsh.js"
+    "check": "node --check index.js && node --check client.js && node --check scripts/sync-upstream.mjs && node --check vendor/hindsight-coding-agents/dist/dsh.js"
   },
   "repository": {
     "type": "git",

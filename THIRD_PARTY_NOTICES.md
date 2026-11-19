@@ -16,5 +16,8 @@ and skill are unchanged. The upstream package is distributed as prebuilt code;
 this repository does not claim to contain its original TypeScript build tree.
 
 The manager imports this local runtime directly. It does not download or overwrite
-the vendored code during installation. Updating it requires an explicit repository
-change and a rerun of the regression tests.
+the vendored code during installation. The upstream sync workflow uses
+`upstream-sync.json` and `patches/hindsight-dsh.patch` to prepare updates in a pull
+request after the regression and packaging tests pass. Conflicting upstream changes
+require porting the patch. License changes and server compatibility are reviewed
+before merging; the existing upstream MIT license is preserved during synchronization.
