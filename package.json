@@ -1,0 +1,51 @@
+{
+  "name": "dsh-hindsight-manager",
+  "version": "0.1.0",
+  "description": "Hindsight memory for DeepSeek Harness with per-workspace tools and a settings panel",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./runtime": "./vendor/hindsight-coding-agents/dist/dsh.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "vendor",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": "0.2.2-rc.1"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-general",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test --test-isolation=none tests/*.test.mjs",
+    "check": "node --check index.js && node --check client.js && node --check vendor/hindsight-coding-agents/dist/dsh.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/moshangssh/dsh-hindsight-manager.git"
+  },
+  "bugs": { "url": "https://github.com/moshangssh/dsh-hindsight-manager/issues" },
+  "keywords": ["dsh-plugin", "deepseek-harness", "hindsight", "memory"],
+  "license": "MIT",
+  "private": true
+}

@@ -1,0 +1,60 @@
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
+import test from 'node:test';
+
+const run = promisify(execFile);
+
+test('packed bundle imports in DSH without the source checkout or local peer links', async () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const temp = mkdtempSync(join(tmpdir(), 'dsh-package-test-'));
+  try {
+    await run('npm', ['--cache', join(temp, 'npm-cache'), 'pack', '--ignore-scripts', '--silent', '--pack-destination', temp], {
+      cwd: root, encoding: 'utf8',
+    });
+    const archives = readdirSync(temp).filter((file) => file.endsWith('.tgz'));
+    assert.equal(archives.length, 1);
+    await run('tar', ['-xzf', join(temp, archives[0]), '-C', temp]);
+    const packed = join(temp, 'package');
+    const manifest = JSON.parse(readFileSync(join(packed, 'package.json'), 'utf8'));
+    assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml');
+    assert.equal(manifest.engines.dsh, '0.2.2-rc.1');
+    assert.equal(existsSync(join(packed, 'node_modules')), false);
+    for (const file of ['dsh.js', 'deepen.js', 'daemon-start.js', 'mcp-server.js', 'survey-supervisor.js']) {
+      assert.ok(existsSync(join(packed, 'vendor/hindsight-coding-agents/dist', file)), file);
+    }
+    assert.ok(existsSync(join(packed, 'vendor/hindsight-coding-agents/skill/SKILL.md')));
+    const plugin = await import(pathToFileURL(join(packed, 'index.js')));
+    assert.equal(typeof plugin.apply, 'function');
+    const runtime = await import(pathToFileURL(join(packed, 'vendor/hindsight-coding-agents/dist/dsh.js')));
+    assert.equal(typeof runtime.createDshRuntime, 'function');
+
+    const executable = process.env.PATH.split(delimiter).map((path) => join(path, 'dsh')).find(existsSync);
+    assert.ok(executable, 'Install DSH to verify its actual bundle loader');
+    const installation = dirname(dirname(realpathSync(executable)));
+    const { loadProfileDirectory, generateConfigSchema } = await import(pathToFileURL(
+      join(installation, 'node_modules/@deepseek-ai/dsh-app-boot/lib/index.js'),
+    ));
+    const profileDir = join(temp, 'profiles', 'test');
+    mkdirSync(join(profileDir, 'node_modules'), { recursive: true });
+    symlinkSync(packed, join(profileDir, 'node_modules', manifest.name));
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+      name: 'test-profile', private: true,
+      dependencies: { [manifest.name]: `link:${packed}` },
+      dsh: { profile: { bundles: [manifest.name] } },
+    }));
+    const anchor = join(installation, 'package.json');
+    const profile = loadProfileDirectory('test', profileDir, anchor, { userLayer: false });
+    assert.deepEqual(profile.skippedBundles, []);
+    const schema = await generateConfigSchema(profile, profile.layers.map((layer) => layer.patches), anchor);
+    assert.equal(schema['x-cordis'].complete, true);
+    assert.deepEqual(schema['x-cordis'].diagnostics, []);
+    assert.equal(schema['x-cordis'].entries[0].name, manifest.name);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
