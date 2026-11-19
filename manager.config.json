@@ -1,0 +1,15 @@
+{
+  "configPath": "~/.hindsight/coding-agent.json",
+  "requestTimeoutMs": 10000,
+  "maxRequestBytes": 1048576,
+  "errorPreviewChars": 300,
+  "formDefaults": {
+    "serverMode": "cloud",
+    "apiUrl": "https://api.hindsight.vectorize.io",
+    "apiPort": 9077,
+    "mapPathToBank": {},
+    "optInOnly": false,
+    "optInPaths": [],
+    "retainSessions": true
+  }
+}

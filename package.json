@@ -1,23 +1,21 @@
 {
   "name": "dsh-hindsight-manager",
-  "version": "0.1.0",
-  "description": "Hindsight memory for DeepSeek Harness with per-workspace tools and a settings panel",
+  "version": "0.2.0",
+  "description": "Settings panel for the official Hindsight plugin in DeepSeek Harness",
   "type": "module",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
-    "./runtime": "./vendor/hindsight-coding-agents/dist/dsh.js",
     "./package.json": "./package.json"
   },
   "files": [
     "index.js",
     "client.js",
     "cordis.patch.yml",
-    "vendor",
+    "manager.config.json",
     "README.md",
-    "LICENSE",
-    "THIRD_PARTY_NOTICES.md"
+    "LICENSE"
   ],
   "engines": {
     "node": ">=24.9.0",
@@ -37,9 +35,8 @@
     }
   },
   "scripts": {
-    "sync:upstream": "node scripts/sync-upstream.mjs",
     "test": "node --test --test-isolation=none tests/*.test.mjs",
-    "check": "node --check index.js && node --check client.js && node --check scripts/sync-upstream.mjs && node --check vendor/hindsight-coding-agents/dist/dsh.js"
+    "check": "node --check index.js && node --check client.js"
   },
   "repository": {
     "type": "git",

@@ -24,14 +24,13 @@ test('packed bundle imports in DSH without the source checkout or local peer lin
     assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml');
     assert.equal(manifest.engines.dsh, '0.2.2-rc.1');
     assert.equal(existsSync(join(packed, 'node_modules')), false);
-    for (const file of ['dsh.js', 'deepen.js', 'daemon-start.js', 'mcp-server.js', 'survey-supervisor.js']) {
-      assert.ok(existsSync(join(packed, 'vendor/hindsight-coding-agents/dist', file)), file);
-    }
-    assert.ok(existsSync(join(packed, 'vendor/hindsight-coding-agents/skill/SKILL.md')));
+    assert.equal(existsSync(join(packed, 'vendor')), false);
+    assert.equal(manifest.exports['./runtime'], undefined);
+    assert.equal(manifest.dependencies?.['@vectorize-io/hindsight-coding-agents'], undefined);
+    assert.ok(existsSync(join(packed, 'manager.config.json')));
     const plugin = await import(pathToFileURL(join(packed, 'index.js')));
     assert.equal(typeof plugin.apply, 'function');
-    const runtime = await import(pathToFileURL(join(packed, 'vendor/hindsight-coding-agents/dist/dsh.js')));
-    assert.equal(typeof runtime.createDshRuntime, 'function');
+    assert.deepEqual(plugin.inject, ['webServer', 'connection']);
 
     const executable = process.env.PATH.split(delimiter).map((path) => join(path, 'dsh')).find(existsSync);
     assert.ok(executable, 'Install DSH to verify its actual bundle loader');
