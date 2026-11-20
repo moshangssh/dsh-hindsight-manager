@@ -1,6 +1,6 @@
 {
   "name": "dsh-hindsight-manager",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Settings panel for the official Hindsight plugin in DeepSeek Harness",
   "type": "module",
   "main": "index.js",

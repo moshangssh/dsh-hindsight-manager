@@ -31,7 +31,7 @@ dsh plugin --profile web add github:moshangssh/dsh-hindsight-manager
 部署机器不能连接外网时，在开发机器进入本仓库执行 `npm pack`，传入安装包：
 
 ```bash
-dsh plugin --profile web add ./dsh-hindsight-manager-0.2.0.tgz --offline
+dsh plugin --profile web add ./dsh-hindsight-manager-0.2.1.tgz --offline
 ```
 
 这个安装包包含管理界面及可手动应用的运行时补丁。Node.js、DSH、官方 Hindsight 插件和可访问的 Hindsight 服务
