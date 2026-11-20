@@ -22,15 +22,24 @@ test('packed bundle imports in DSH without the source checkout or local peer lin
     const packed = join(temp, 'package');
     const manifest = JSON.parse(readFileSync(join(packed, 'package.json'), 'utf8'));
     assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml');
+    assert.equal(manifest.version, '0.3.0');
     assert.equal(manifest.engines.dsh, '0.2.2-rc.1');
     assert.equal(existsSync(join(packed, 'node_modules')), false);
     assert.equal(existsSync(join(packed, 'vendor')), false);
     assert.equal(manifest.exports['./runtime'], undefined);
     assert.equal(manifest.dependencies?.['@vectorize-io/hindsight-coding-agents'], undefined);
     assert.ok(existsSync(join(packed, 'manager.config.json')));
-    for (const file of ['README.md', '0001-dsh-compatibility.patch', '0002-active-memory.patch', '0003-review-fixes.patch']) {
+    for (const file of ['README.md', '0001-dsh-compatibility.patch', '0002-active-memory.patch', '0003-review-fixes.patch', '0004-enhancement-declaration.patch']) {
       assert.ok(existsSync(join(packed, 'runtime-patches', file)), `${file} must ship for offline use`);
     }
+    assert.equal(manifest.scripts['test:runtime'], 'node scripts/test-runtime.mjs');
+    assert.ok(existsSync(join(packed, 'scripts/test-runtime.mjs')));
+    assert.ok(existsSync(join(packed, 'tests/runtime/settings.test.mjs')));
+    assert.ok(existsSync(join(packed, 'tests/fixtures/api-contract-1.2.3.json')));
+    assert.equal(existsSync(join(packed, 'dsh-enhancement.json')), false, 'the declaration belongs to the patched official package');
+    await assert.rejects(run(process.execPath, ['scripts/test-runtime.mjs'], {
+      cwd: packed, encoding: 'utf8',
+    }), (error) => error.code === 1 && /Usage: npm run test:runtime/.test(error.stderr));
     const plugin = await import(pathToFileURL(join(packed, 'index.js')));
     assert.equal(typeof plugin.apply, 'function');
     assert.deepEqual(plugin.inject, ['webServer', 'connection']);

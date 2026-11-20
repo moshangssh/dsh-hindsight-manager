@@ -1,6 +1,6 @@
 {
   "name": "dsh-hindsight-manager",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Settings panel for the official Hindsight plugin in DeepSeek Harness",
   "type": "module",
   "main": "index.js",
@@ -15,6 +15,9 @@
     "cordis.patch.yml",
     "manager.config.json",
     "runtime-patches",
+    "scripts/test-runtime.mjs",
+    "tests/runtime",
+    "tests/fixtures/api-contract-1.2.3.json",
     "README.md",
     "LICENSE"
   ],
@@ -37,6 +40,7 @@
   },
   "scripts": {
     "test": "node --test --test-isolation=none tests/*.test.mjs",
+    "test:runtime": "node scripts/test-runtime.mjs",
     "check": "node --check index.js && node --check client.js"
   },
   "repository": {

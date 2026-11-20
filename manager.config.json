@@ -3,6 +3,28 @@
   "requestTimeoutMs": 10000,
   "maxRequestBytes": 1048576,
   "errorPreviewChars": 300,
+  "officialPackagePath": "",
+  "declarationFile": "dsh-enhancement.json",
+  "supportedEnhancement": {
+    "upstream": {
+      "name": "@vectorize-io/hindsight-coding-agents",
+      "version": "0.8.7"
+    },
+    "patchSetVersion": "1",
+    "defaultsFile": "dsh-memory.config.json"
+  },
+  "bankListLimit": 100,
+  "options": {
+    "autoInjectModes": ["none", "recall", "pages", "reflect"],
+    "recallBudgets": ["low", "mid", "high"],
+    "recallTypes": ["world", "experience", "observation"]
+  },
+  "recallDefaults": {
+    "types": ["observation"],
+    "budget": "low",
+    "max_tokens": 2000,
+    "include": { "entities": null }
+  },
   "formDefaults": {
     "serverMode": "cloud",
     "apiUrl": "https://api.hindsight.vectorize.io",
@@ -10,6 +32,9 @@
     "mapPathToBank": {},
     "optInOnly": false,
     "optInPaths": [],
-    "retainSessions": true
+    "retainSessions": true,
+    "autoInject": "reflect",
+    "autoInjectEveryTurns": 0,
+    "injectTimeoutMs": 7000
   }
 }

@@ -1,0 +1,255 @@
+{
+  "source": {
+    "title": "Hindsight HTTP API",
+    "version": "1.2.3",
+    "retrievedAt": "2026-11-20",
+    "endpoint": "/openapi.json",
+    "scope": "Selected schemas from the deployed API; RecallRequest contains only the settings managed here. No deployment URL or credentials."
+  },
+  "components": {
+    "schemas": {
+      "BankListResponse": {
+        "properties": {
+          "banks": {
+            "items": {
+              "$ref": "#/components/schemas/BankListItem"
+            },
+            "type": "array",
+            "title": "Banks"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "Total number of banks visible to the caller, ignoring `limit`/`offset`."
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "banks",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "BankListResponse",
+        "description": "Response model for listing banks, one page at a time.",
+        "example": {
+          "banks": [
+            {
+              "bank_id": "user123",
+              "created_at": "2024-01-15T10:30:00Z",
+              "disposition": {
+                "empathy": 3,
+                "literalism": 3,
+                "skepticism": 3
+              },
+              "fact_count": 156,
+              "last_document_at": "2024-01-16T14:20:00Z",
+              "last_write_at": "2024-01-17T09:05:00Z",
+              "mission": "I am a software engineer helping my team ship quality code",
+              "name": "Alice",
+              "updated_at": "2024-01-16T14:20:00Z"
+            }
+          ],
+          "limit": 100,
+          "offset": 0,
+          "total": 50
+        }
+      },
+      "BankListItem": {
+        "properties": {
+          "bank_id": {
+            "type": "string",
+            "title": "Bank Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "disposition": {
+            "$ref": "#/components/schemas/DispositionTraits"
+          },
+          "mission": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mission"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "fact_count": {
+            "type": "integer",
+            "title": "Fact Count",
+            "default": 0
+          },
+          "last_document_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Document At",
+            "description": "When a document was last *ingested* into this bank. Appending to an existing document does not move this — use `last_write_at` for write activity."
+          },
+          "last_write_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Write At",
+            "description": "When anything was last written to this bank: a document retained (including appends to an existing document) or a fact stored. Null if the bank is empty."
+          },
+          "display_alias": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Alias",
+            "description": "The alias this bank is presented under, when one was promoted. Display only: `bank_id` remains the bank's identity everywhere else. Null when no alias is primary, in which case show `bank_id`."
+          },
+          "matched_aliases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Matched Aliases",
+            "description": "Aliases of this bank that matched the search `q`. Empty when no search was made, or when the bank matched on its own id or name — so a non-empty value explains a result whose `bank_id` does not contain the search text."
+          }
+        },
+        "type": "object",
+        "required": [
+          "bank_id",
+          "disposition"
+        ],
+        "title": "BankListItem",
+        "description": "Bank list item with profile summary and stats."
+      },
+      "DispositionTraits": {
+        "properties": {
+          "skepticism": {
+            "type": "integer",
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "Skepticism",
+            "description": "How skeptical vs trusting (1=trusting, 5=skeptical)"
+          },
+          "literalism": {
+            "type": "integer",
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "Literalism",
+            "description": "How literally to interpret information (1=flexible, 5=literal)"
+          },
+          "empathy": {
+            "type": "integer",
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "Empathy",
+            "description": "How much to consider emotional context (1=detached, 5=empathetic)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "skepticism",
+          "literalism",
+          "empathy"
+        ],
+        "title": "DispositionTraits",
+        "description": "Disposition traits that influence how memories are formed and interpreted.",
+        "example": {
+          "empathy": 3,
+          "literalism": 3,
+          "skepticism": 3
+        }
+      },
+      "Budget": {
+        "type": "string",
+        "enum": [
+          "low",
+          "mid",
+          "high"
+        ],
+        "title": "Budget",
+        "description": "Budget levels for recall/reflect operations."
+      },
+      "RecallRequest": {
+        "properties": {
+          "types": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Types",
+            "description": "List of fact types to recall: 'world', 'experience', 'observation'. Defaults to all fact types if not specified."
+          },
+          "budget": {
+            "$ref": "#/components/schemas/Budget",
+            "default": "mid"
+          },
+          "max_tokens": {
+            "type": "integer",
+            "title": "Max Tokens",
+            "default": 4096
+          }
+        }
+      }
+    }
+  }
+}

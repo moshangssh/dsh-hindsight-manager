@@ -23,8 +23,10 @@ DSH **0.2.2-rc.1**。管理器仍负责设置；补丁修改的是官方插件�
 - `0002-active-memory.patch`：每轮召回、根目录参数文件、使用说明、技能说明和主动记忆测试。
 - `0003-review-fixes.patch`：解除工具注册对 DSH 启动目录的依赖，允许失败的会话回写在后续
   停止事件中重试，并将写入接口的 HTTP 404 正确报告为失败，附带回归测试。
+- `0004-enhancement-declaration.patch`：加入根目录 `dsh-enhancement.json` 及打包条目，
+  声明官方包 0.8.7、补丁集 1 和逐轮召回能力，供管理器关联安装产物。
 
-这三份补丁只调整 DSH 运行时；其他助手的运行时代码保持上游行为。
+前三份补丁调整 DSH 运行时；第四份只增加交付声明。其他助手的运行时代码保持上游行为。
 
 ## 离线应用
 
@@ -38,14 +40,20 @@ hindsight_package=/absolute/path/to/hindsight-coding-agents
 git -C "$hindsight_package" apply "$manager_repo/runtime-patches/0001-dsh-compatibility.patch"
 git -C "$hindsight_package" apply "$manager_repo/runtime-patches/0002-active-memory.patch"
 git -C "$hindsight_package" apply "$manager_repo/runtime-patches/0003-review-fixes.patch"
+git -C "$hindsight_package" apply "$manager_repo/runtime-patches/0004-enhancement-declaration.patch"
 npm --prefix "$hindsight_package" run test:dsh
+npm --prefix "$manager_repo" run test:runtime -- "$hindsight_package"
 ```
 
-按顺序应用尚未安装的补丁：已有第一份时应用第二、三份；已有前两份时只应用第三份。
-已经包含三份补丁的本地目录无需再次应用。不要把这些补丁应用到管理器目录。
+按顺序应用尚未安装的补丁。已有前三份时只追加第四份，已经包含四份时无需再次应用。
+补丁应用到官方包目录。
 
-完成后重启加载该官方插件目录的 DSH。管理器在面板中保存的服务地址、工作区映射等配置
-继续使用；管理器本身无需注册另一套记忆工具或会话钩子。
+完成后，在管理器根目录 `manager.config.json` 的 `officialPackagePath` 填入 DSH 实际加载的
+这个目录，再重启 DSH。管理器在面板中保存的设置继续写入官方 `coding-agent.json`。
+管理器读取安装声明和默认参数，不注册第二套记忆工具或会话钩子。
+
+声明只能说明关联产物声明具备该能力，不能证明当前进程已经加载增强。第四份补丁必须与
+前三份一起完成运行时和组合行为验证；只复制声明文件不等于安装了逐轮召回。
 
 ## 参数
 
@@ -67,17 +75,24 @@ npm --prefix "$hindsight_package" run test:dsh
 ```
 
 `autoInjectEveryTurns: 1` 表示每个用户回合召回；正整数 N 表示第 1、1+N、1+2N 回合召回；
-`0` 使用原来的会话首次召回逻辑。`autoInject: "none"` 关闭自动召回。
+`0` 使用原来的会话首次召回及其可能重试的逻辑，不表示关闭。
+`autoInject: "none"` 关闭自动检索记忆正文，工具和会话回写由各自配置控制。
 
 根目录文件提供 DSH 默认值，`~/.hindsight/coding-agent.json` 的显式字段、`harnesses.dsh`、
 `paths` 和 `banks` 设置继续覆盖它。新增频率参数不通过环境变量注入。
 修改参数后重启 DSH。完整配置优先级和行为说明也写入了官方插件的 README。
+关联增强后，管理器显示这一层默认值；保存只写用户实际修改的 DSH 覆盖，恢复继承会删除覆盖。
+`recallOptions` 在层之间整组替换，具体编辑与恢复规则见管理器 README。
 
 ## 验证与更新
 
 补丁附带适配器、请求取消、主动记忆、工具注册和会话回写的回归测试，覆盖换话题、空库后
 新增记忆、跨会话自动保存与召回、取消、频率设置、bank 隔离，以及启动目录未启用记忆、
 写入失败后的重试和 HTTP 404。HTTP 使用模拟响应，不向真实 Hindsight 写入测试内容。
+
+管理器的 `test:runtime` 进一步验证当前面板保存到运行时行为的链路，包括两个工作区 bank、
+关闭回写后仍可召回、关闭自动召回后工具与回写独立、切换模式后参数保留、reflect 降级参数和超时。
+常规管理器测试可独立运行；组合验收必须显式提供准备好的运行时目录。
 
 这组补丁针对发布产物，当前目录不包含上游 TypeScript 构建工程。重新安装或重新构建
 官方插件会覆盖修改；升级上游版本后需要重新核对补丁，不能直接假定适用于其他版本。
