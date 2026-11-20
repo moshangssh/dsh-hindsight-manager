@@ -1,0 +1,397 @@
+--- a/dist/dsh.js
++++ b/dist/dsh.js
+@@ -1731,6 +1731,7 @@
+     injectTimeoutMs: raw.injectTimeoutMs || DEFAULT_INJECT_TIMEOUT_MS,
+     reflectBudget: resolveReflectBudget(raw),
+     autoInject: resolveAutoInject(raw),
++    autoInjectEveryTurns: raw.autoInjectEveryTurns,
+     pageSearchLimit: raw.pageSearchLimit || DEFAULT_PAGE_SEARCH_LIMIT,
+     // Same shape as retainMetadata: an object, or nothing. An array would spread into numeric
+     // keys and reach the API as garbage, so it is rejected like any other non-object.
+@@ -1892,7 +1893,10 @@
+ function loadConfig(opts = {}) {
+   const o = typeof opts === "string" ? { path: opts } : opts;
+   const withEnv = applyLayer({}, readEnvConfig(), o.harness);
+-  const raw = applyLayer(withEnv, readRaw(o.path ?? CONFIG_PATH), o.harness);
++  const defaults = o.harness === "dsh" ? mergeRaw(withEnv, JSON.parse(
++    readFileSync3(new URL("../dsh-memory.config.json", import.meta.url), "utf8")
++  )) : withEnv;
++  const raw = applyLayer(defaults, readRaw(o.path ?? CONFIG_PATH), o.harness);
+   if (!raw.harness && o.harness) raw.harness = o.harness;
+   return resolveConfig(raw);
+ }
+@@ -18693,12 +18697,13 @@
+   const { harness, prompt, cfg, client, cacheFile } = args;
+   const cached2 = readSessionCache(cacheFile);
+   const turns = (cached2.turns ?? 0) + 1;
+-  let reflectAnswer = cached2.reflectAnswer;
+-  let reflectAttempts = cached2.reflectAttempts ?? 0;
++  const refreshInjection = cfg.autoInjectEveryTurns > 0 && (turns - 1) % cfg.autoInjectEveryTurns === 0;
++  let reflectAnswer = refreshInjection ? void 0 : cached2.reflectAnswer;
++  let reflectAttempts = refreshInjection ? 0 : cached2.reflectAttempts ?? 0;
+   let reflectRanThisTurn = false;
+   let reflectFailed = false;
+   let fallback;
+-  const deferInitialReflect = cached2.deferInitialReflect === true;
++  const deferInitialReflect = !refreshInjection && cached2.deferInitialReflect === true;
+   if (deferInitialReflect) {
+     diag(harness, "reflect_deferred_new_bank", { query: prompt.slice(0, 80) });
+   } else if (cfg.autoInject === "pages" && reflectAnswer === void 0) {
+@@ -18962,10 +18967,11 @@
+    * undefined.
+    *
+    * It goes into the USER turn on every host, never the system prompt (#5914). The block changes
+-   * from turn to turn — the recall runs once, the roster refresh on a cadence — so a system prompt
++   * from turn to turn according to the retrieval and page-refresh cadences, so a system prompt
+    * carrying it differed between requests and broke the provider's prefix cache from that point
+    * on. Persisted in the turn it belongs to, it leaves the system prompt and the earlier history
+-   * byte-identical. That used to need a fallback to the most recent block for opencode's
++   * byte-identical. DSH can retrieve again on each user turn via autoInjectEveryTurns.
++   * That used to need a fallback to the most recent block for opencode's
+    * `experimental.chat.system.transform`, which fired with no session id; nothing reads it that
+    * way any more.
+    */
+@@ -19200,10 +19206,8 @@
+         diag(HARNESS2, "inject_empty", { session: sessionId });
+         return decision;
+       }
+-      if (injection === lastInjectedText(dshSessionEvents(agent.session))) {
+-        diag(HARNESS2, "inject_unchanged", { session: sessionId });
+-        return decision;
+-      }
++      // A previous injection may have been compacted out of the model's context.
++      // Deliver this turn's retrieval even when its text matches an earlier turn.
+       diag(HARNESS2, "inject_ok", { session: sessionId, chars: injection.length });
+       return { ...decision, messages: [...decision.messages, injectionMessage(injection)] };
+     },
+--- a/package.json
++++ b/package.json
+@@ -68,6 +68,7 @@
+   "files": [
+     "skill",
+     "dist",
++    "dsh-memory.config.json",
+     "index.js",
+     "cordis.patch.yml",
+     "plugin.json",
+@@ -96,7 +97,7 @@
+     "clean": "rm -rf dist",
+     "prepublishOnly": "npm run clean && npm run skill:build && npm run build",
+     "test": "vitest run --exclude '**/*.e2e.test.ts'",
+-    "test:dsh": "node --test --test-isolation=none tests/*.test.mjs",
++    "test:dsh": "node --test tests/*.test.mjs",
+     "test:dcode-e2e": "npm run build && HINDSIGHT_DCODE_E2E=1 vitest run src/dcode-plugin.e2e.test.ts",
+     "test:harness-e2e": "npm run build && HINDSIGHT_HARNESS_E2E=1 vitest run src/harness.e2e.test.ts"
+   },
+--- a/README.md
++++ b/README.md
+@@ -383,6 +383,42 @@
+ they began. Runtime disposal releases session references and drains outstanding transcript writes.
+ The existing session snapshot reader remains on the host's deprecated API; migrating that reader
+ to a session projection is separate from these compatibility fixes.
++
++##### Active long-term memory in this local DSH build
++
++This local build retrieves memory for **each user turn**, using the current message as the query,
++and injects the result before the model answers. A topic change therefore triggers its own retrieval.
++Tool-only continuation steps do not retrieve again. Replies are automatically retained at turn stop;
++Hindsight performs extraction and consolidation asynchronously, so newly saved facts become searchable
++after the server processes them. This does not require the model to decide to call a memory tool.
++The existing tools remain available for deliberate searches, deeper reflection and corrections.
++
++The policy lives in the package root's [`dsh-memory.config.json`](./dsh-memory.config.json):
++
++| Setting | Shipped value | Meaning |
++| --- | --- | --- |
++| `autoInject` | `"recall"` | Retrieve facts directly; `reflect`, `pages`, and `none` remain available |
++| `autoInjectEveryTurns` | `1` | Retrieve every user turn; `N` retrieves on turns 1, 1+N, etc.; `0` keeps the original session-start behavior |
++| `injectTimeoutMs` | `7000` | Deadline for automatic recall/page search, in milliseconds |
++| `recallOptions.types` | `["observation", "world", "experience"]` | Include consolidated knowledge and extracted facts that have not yet been consolidated |
++| `recallOptions.max_tokens` | `2000` | Server-side recall response token budget |
++| `recallOptions.budget` | `"low"` | Retrieval search budget |
++| `retainSessions` | `true` | Automatically retain conversations |
++| `autoUpdate` | `false` | Keep this local runtime from checking npm for updates |
++
++These DSH defaults load after the existing environment compatibility layer and before
++`~/.hindsight/coding-agent.json`. Explicit settings in that file, `harnesses.dsh`, `paths` and `banks`
++continue to override them. No new environment variables are introduced. A missing or malformed root
++policy file is a configuration error. Include it when copying this plugin offline.
++
++An empty recall or an earlier failed request does not stop future scheduled retrievals. Identical
++results are injected again because older injected messages may have left the model's context during
++compaction. Retrieved context is excluded from automatic transcript retention.
++
++Restart DSH to load code changes. Policy changes apply when the runtime is recreated (on restart,
++or via the local manager's `runtime.refresh()`). The published settings-only manager requires a
++restart. This is a local change to `dist/dsh.js`; reinstalling or rebuilding the upstream package
++replaces it. The other bundled agent adapters retain their upstream behavior.
+ 
+ #### <img src="https://hindsight.vectorize.io/img/harness/workbuddy.png" alt="" width="20" height="20" /> WorkBuddy
+ 
+--- a/skill/SKILL.md
++++ b/skill/SKILL.md
+@@ -14,6 +14,11 @@
+ 
+ ## What happens automatically (no action needed)
+ 
++- **Local DSH build**: `dsh-memory.config.json` in the plugin package root enables retrieval on
++  every user turn by default (`autoInject: "recall"`, `autoInjectEveryTurns: 1`). Results arrive
++  before the model answers; tool-only continuation steps do not trigger another retrieval.
++  Explicit settings in `~/.hindsight/coding-agent.json` override this policy. The session-start-only
++  synthesis described below remains the upstream behavior for the other agent adapters.
+ - **Per-repo memory bank**: each repository resolves to a bank (shown in the session banner:
+   `↳ memory bank “coding-agent::<repo>”`). Worktrees share the main repo's bank.
+ - **Ingestion builds itself**: on first open, the bank is seeded from recent commit messages and a
+--- /dev/null
++++ b/dsh-memory.config.json
+@@ -0,0 +1,12 @@
++{
++  "autoInject": "recall",
++  "autoInjectEveryTurns": 1,
++  "injectTimeoutMs": 7000,
++  "recallOptions": {
++    "types": ["observation", "world", "experience"],
++    "budget": "low",
++    "max_tokens": 2000
++  },
++  "retainSessions": true,
++  "autoUpdate": false
++}
+--- /dev/null
++++ b/tests/dsh-memory.test.mjs
+@@ -0,0 +1,235 @@
++import assert from 'node:assert/strict';
++import { randomUUID } from 'node:crypto';
++import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { after, afterEach, beforeEach, test } from 'node:test';
++import { agentFor } from './load-adapter.mjs';
++
++const directory = mkdtempSync(join(tmpdir(), 'dsh-memory-test-'));
++const configPath = join(directory, 'coding-agent.json');
++const workspace = join(directory, 'project');
++const previousEnvironment = new Map();
++for (const [key, value] of Object.entries({
++  HINDSIGHT_CONFIG: configPath,
++  HINDSIGHT_LOG_FILE: join(directory, 'plugin.log'),
++  HINDSIGHT_DIAG_FILE: join(directory, 'diagnostics.jsonl'),
++  HINDSIGHT_USAGE_FILE: join(directory, 'usage.jsonl'),
++})) {
++  previousEnvironment.set(key, process.env[key]);
++  process.env[key] = value;
++}
++const { createDshRuntime } = await import('../dist/dsh.js');
++const originalFetch = globalThis.fetch;
++const defaults = JSON.parse(readFileSync(new URL('../dsh-memory.config.json', import.meta.url)));
++const runtimes = [];
++const sessions = [];
++let requests;
++let unexpected;
++let recall;
++let documents;
++
++function configure(patch = {}) {
++  writeFileSync(configPath, JSON.stringify({
++    serverMode: 'self-hosted', apiUrl: 'http://memory.invalid',
++    autoSeed: false, autoUpdate: false,
++    harnesses: { dsh: { bankId: 'project-memory', ...patch } },
++  }));
++}
++
++function makeRuntime(root = workspace) {
++  const runtime = createDshRuntime();
++  runtimes.push(runtime);
++  const memory = runtime.workspaceFor(root);
++  // Exercise prompt + stop hooks without running the unrelated git/skill seeding job.
++  memory.seeded = Promise.resolve();
++  return { runtime, core: memory.core };
++}
++
++function newAgent(root = workspace) {
++  const agent = agentFor(root, randomUUID());
++  sessions.push(agent.session.header.id);
++  return agent;
++}
++
++async function prompt(runtime, agent, text, signal = new AbortController().signal) {
++  const message = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] };
++  const decision = { kind: 'enter', startsRequestSeries: true, messages: [message] };
++  const result = await runtime.hooks.preStep({ agent, signal }, async () => decision);
++  for (const data of result.messages) agent.session.events.push({ type: 'user/message', data });
++  return result.messages.filter((m) => m.source.kind === 'plugin:hindsight')
++    .flatMap((m) => m.content.map((block) => block.text)).join('\n');
++}
++
++function recallRequests() {
++  return requests.filter((r) => r.path.endsWith('/memories/recall'));
++}
++
++beforeEach(() => {
++  configure();
++  requests = [];
++  unexpected = [];
++  documents = new Map();
++  recall = ({ query }) => Response.json({ results: [{ text: `Memory about ${query}` }] });
++  globalThis.fetch = async (url, options) => {
++    const path = new URL(url).pathname;
++    const body = options.body ? JSON.parse(options.body) : undefined;
++    requests.push({ path, body });
++    if (path.endsWith('/memories/recall')) return recall(body, options);
++    if (path.endsWith('/pages/tree')) return Response.json({ roots: [] });
++    if (path.endsWith('/reflect')) return Response.json({ text: `Reflection about ${body.query}` });
++    if (path.endsWith('/pages/search')) return Response.json({ items: [] });
++    if (path === '/v1/version') return Response.json({ api_version: '0.10.2' });
++    if (path.endsWith('/config')) return Response.json({ config: { store_document_text: true } });
++    if (path.includes('/operations/')) return Response.json({ status: 'completed' });
++    if (path.endsWith('/memories')) {
++      for (const item of body.items) {
++        const previous = documents.get(item.document_id) ?? '';
++        documents.set(item.document_id, item.update_mode === 'append' ? previous + '\n' + item.content : item.content);
++      }
++      return Response.json({ operation_id: body.operation_id });
++    }
++    unexpected.push(path);
++    throw new Error(`Unexpected request: ${path}`);
++  };
++});
++
++afterEach(async () => {
++  for (const runtime of runtimes.splice(0)) await runtime.dispose();
++  for (const id of sessions.splice(0)) rmSync(join(tmpdir(), 'hindsight-dsh', `${id}.json`), { force: true });
++  assert.deepEqual(unexpected, []);
++});
++
++after(() => {
++  globalThis.fetch = originalFetch;
++  for (const [key, value] of previousEnvironment) {
++    if (value === undefined) delete process.env[key];
++    else process.env[key] = value;
++  }
++  rmSync(directory, { recursive: true, force: true });
++});
++
++test('each user turn retrieves its current topic, including repeated text after compaction', async () => {
++  const { runtime, core } = makeRuntime();
++  const agent = newAgent();
++  assert.equal(core.cfg.autoInjectEveryTurns, defaults.autoInjectEveryTurns);
++  assert.equal(core.cfg.autoInject, defaults.autoInject);
++  assert.match(await prompt(runtime, agent, 'database design'), /Memory about database design/);
++  const changed = await prompt(runtime, agent, 'Chinese response preference');
++  assert.match(changed, /Memory about Chinese response preference/);
++  assert.doesNotMatch(changed, /Memory about database design/);
++  // The event log survives compaction, so matching an older injected event must not suppress this turn.
++  assert.match(await prompt(runtime, agent, 'Chinese response preference'), /Memory about Chinese response preference/);
++  assert.deepEqual(recallRequests().map((r) => r.body.query), [
++    'database design', 'Chinese response preference', 'Chinese response preference',
++  ]);
++  assert.deepEqual(recallRequests()[0].body.types, defaults.recallOptions.types);
++  assert.equal(recallRequests()[0].body.max_tokens, defaults.recallOptions.max_tokens);
++  const continuation = { kind: 'enter', messages: [] };
++  assert.equal(await runtime.hooks.preStep({ agent, signal: new AbortController().signal }, async () => continuation), continuation);
++  assert.equal(recallRequests().length, 3, 'tool-only continuation must not recall again');
++});
++
++test('an empty bank and a failed request do not disable later automatic recall', async () => {
++  const { runtime, core } = makeRuntime();
++  const agent = newAgent();
++  core.deferInitialReflect = true;
++  recall = () => Response.json({ results: [] });
++  for (let i = 0; i < 6; i++) await prompt(runtime, agent, `empty turn ${i}`);
++  assert.equal(recallRequests().length, 6);
++  recall = () => new Response('unavailable', { status: 503 });
++  assert.doesNotMatch(await prompt(runtime, agent, 'failed turn'), /<hindsight_memory>/);
++  recall = () => Response.json({ results: [{ text: 'A newly stored preference' }] });
++  assert.match(await prompt(runtime, agent, 'new preference'), /A newly stored preference/);
++  assert.equal(recallRequests().length, 8);
++});
++
++test('automatic write-back captures the final reply and is available in a new session', async () => {
++  const { runtime, core } = makeRuntime();
++  const agent = newAgent();
++  recall = () => Response.json({ results: [] });
++  await prompt(runtime, agent, 'Remember that I prefer Chinese replies.');
++  agent.session.events.push({ type: 'assistant/message', data: {
++    message: { content: [{ type: 'text', text: 'I will reply in Chinese.' }] },
++  } });
++  await runtime.hooks.turnStopping({ agent });
++  await core.flush();
++  const saved = documents.get(`conversation:${agent.session.header.id}`);
++  assert.match(saved, /prefer Chinese replies/);
++  assert.match(saved, /I will reply in Chinese/);
++  assert.doesNotMatch(saved, /hindsight_pages|hindsight_page_refresh|hindsight_memory/);
++  assert.equal(requests.filter((r) => r.path.endsWith('/memories')).length, 1);
++  await runtime.hooks.turnStopping({ agent });
++  await core.flush();
++  assert.equal(requests.filter((r) => r.path.endsWith('/memories')).length, 1, 'unchanged stop must not duplicate the write');
++  // Simulate the server finishing extraction; the plugin itself does not do the extraction.
++  recall = () => Response.json({ results: [{ text: 'The user prefers Chinese replies.' }] });
++  const next = newAgent();
++  assert.match(await prompt(runtime, next, 'How should you answer me?'), /prefers Chinese replies/);
++});
++
++test('cancellation of a later recall does not inject the previous topic or consume the turn', async () => {
++  const { runtime, core } = makeRuntime();
++  const agent = newAgent();
++  await prompt(runtime, agent, 'old topic');
++  let started;
++  const entered = new Promise((resolve) => { started = resolve; });
++  recall = (_body, { signal }) => new Promise((_resolve, reject) => {
++    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
++    started();
++  });
++  const controller = new AbortController();
++  const reason = new Error('user stopped this turn');
++  const pending = prompt(runtime, agent, 'new topic', controller.signal);
++  const rejected = assert.rejects(pending, (error) => error === reason);
++  await entered;
++  controller.abort(reason);
++  await rejected;
++  assert.equal(core.turnCount.get(agent.session.header.id), 1);
++  recall = () => Response.json({ results: [{ text: 'New topic recovered' }] });
++  assert.match(await prompt(runtime, agent, 'new topic'), /New topic recovered/);
++});
++
++test('cadence, retrieval mode and explicit disable remain configurable', async () => {
++  configure({ autoInjectEveryTurns: 2, autoInject: 'reflect', retainSessions: false });
++  const { runtime } = makeRuntime();
++  const agent = newAgent();
++  await prompt(runtime, agent, 'first');
++  await prompt(runtime, agent, 'second');
++  await prompt(runtime, agent, 'third');
++  assert.equal(requests.filter((r) => r.path.endsWith('/reflect')).length, 2);
++  assert.equal(recallRequests().length, 0);
++  configure({ autoInjectEveryTurns: 0, autoInject: 'recall' });
++  await runtime.refresh();
++  runtime.workspaceFor(workspace).seeded = Promise.resolve();
++  const once = newAgent();
++  await prompt(runtime, once, 'once');
++  await prompt(runtime, once, 'later');
++  assert.equal(recallRequests().length, 1);
++  configure({ autoInject: 'none', retainSessions: false });
++  await runtime.refresh();
++  runtime.workspaceFor(workspace).seeded = Promise.resolve();
++  const off = newAgent();
++  assert.doesNotMatch(await prompt(runtime, off, 'do not recall'), /<hindsight_memory>/);
++  await runtime.hooks.turnStopping({ agent: off });
++  await runtime.workspaceFor(workspace).core.flush();
++  assert.equal(recallRequests().length, 1);
++  assert.equal(documents.size, 0);
++});
++
++test('workspaces use their own bank and bank-level settings override the root defaults', async () => {
++  const otherRoot = join(directory, 'other-project');
++  const raw = JSON.parse(readFileSync(configPath));
++  raw.harnesses.dsh.mapPathToBank = { [workspace]: 'one', [otherRoot]: 'two' };
++  raw.banks = { two: { recallOptions: { max_tokens: 321 } } };
++  writeFileSync(configPath, JSON.stringify(raw));
++  const { runtime } = makeRuntime();
++  runtime.workspaceFor(otherRoot).seeded = Promise.resolve();
++  await prompt(runtime, newAgent(), 'first workspace');
++  await prompt(runtime, newAgent(otherRoot), 'second workspace');
++  const [one, two] = recallRequests();
++  assert.match(one.path, /\/banks\/one\//);
++  assert.match(two.path, /\/banks\/two\//);
++  assert.equal(one.body.max_tokens, defaults.recallOptions.max_tokens);
++  assert.equal(two.body.max_tokens, 321);
++});

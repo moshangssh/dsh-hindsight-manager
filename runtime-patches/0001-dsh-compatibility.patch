@@ -1,0 +1,976 @@
+--- a/dist/dsh.js
++++ b/dist/dsh.js
+@@ -715,6 +715,25 @@
+ }
+ 
+ // src/core/hindsight.ts
++import { AsyncLocalStorage } from "node:async_hooks";
++import { setTimeout as sleepWithSignal } from "node:timers/promises";
++var callerCancellation = new AsyncLocalStorage();
++function throwIfCallerAborted() {
++  callerCancellation.getStore()?.throwIfAborted();
++}
++function withCallerSignal(signal, callback) {
++  return callerCancellation.run(signal, async () => {
++    signal?.throwIfAborted();
++    try {
++      const result = await callback();
++      signal?.throwIfAborted();
++      return result;
++    } catch (error) {
++      signal?.throwIfAborted();
++      throw error;
++    }
++  });
++}
+ var USER_AGENT = `hindsight-coding-agents/${version}`;
+ function resolveRetainScopes(tags, configured) {
+   if (configured !== "per_source") return configured;
+@@ -751,6 +770,7 @@
+     const j = await r.json();
+     return String(j?.detail ?? "").trim().toLowerCase() === "not found";
+   } catch {
++    throwIfCallerAborted();
+     return false;
+   }
+ }
+@@ -889,9 +909,15 @@
+    * bounds the whole call.
+    */
+   async fetchWithAuth(url2, init) {
+-    const dispatcher = init.signal ? signalOnlyDispatcher() : void 0;
+-    const send = () => fetch(url2, { ...init, headers: this.headers(), ...dispatcher ? { dispatcher } : {} });
++    const callerSignal = callerCancellation.getStore();
++    const signal = callerSignal && init.signal ? AbortSignal.any([callerSignal, init.signal]) : callerSignal ?? init.signal;
++    const dispatcher = signal ? signalOnlyDispatcher() : void 0;
++    const send = () => {
++      callerSignal?.throwIfAborted();
++      return fetch(url2, { ...init, signal, headers: this.headers(), ...dispatcher ? { dispatcher } : {} });
++    };
+     const r = await send();
++    callerSignal?.throwIfAborted();
+     if (r.status !== 401 || !this.refreshToken()) return r;
+     return send();
+   }
+@@ -919,7 +945,7 @@
+       const backoff = Math.min(RETRY_AFTER_CEILING_MS, RATE_LIMIT_BACKOFF_MS * 2 ** attempt);
+       const wait = Math.min(RETRY_AFTER_CEILING_MS, Math.max(asked, backoff)) * (1 + Math.random() / 2);
+       if (waited + wait > this.rateLimitPatienceMs) throw new RateLimitedError(asked);
+-      await sleep(wait);
++      await sleepWithSignal(wait, void 0, { signal: callerCancellation.getStore() });
+       waited += wait;
+     }
+     if (!r.ok && r.status !== 404 && !tolerate.includes(r.status))
+@@ -952,6 +978,7 @@
+       const j = await r.json();
+       if (j.operation_id) this.opIds.push(j.operation_id);
+     } catch {
++      throwIfCallerAborted();
+     }
+   }
+   /**
+@@ -1021,6 +1048,7 @@
+         items = j.items || [];
+         total = j.total ?? 0;
+       } catch {
++        throwIfCallerAborted();
+         break;
+       }
+       for (const it of items) if (it.id) ids.add(it.id);
+@@ -1119,6 +1147,7 @@
+       const ops = j.operations ?? j.items ?? [];
+       return ops.filter((o) => !TERMINAL.has((o?.status || "").toLowerCase())).length;
+     } catch {
++      throwIfCallerAborted();
+       return 0;
+     }
+   }
+@@ -1204,6 +1233,7 @@
+       const data = await resp.json();
+       return (data.text || "").trim();
+     } catch (e) {
++      throwIfCallerAborted();
+       if (ctrl.signal.aborted)
+         throw new ReflectError(`reflect timed out after ${opts.timeoutMs}ms`, void 0, true, {
+           cause: e
+@@ -1279,6 +1309,7 @@
+     try {
+       return (await r.json()).roots ?? [];
+     } catch {
++      throwIfCallerAborted();
+       return [];
+     }
+   }
+@@ -1493,6 +1524,7 @@
+         const j = await r?.json();
+         pageId = j?.page_id ?? j?.id;
+       } catch {
++        throwIfCallerAborted();
+       }
+       pageId ||= `initiative-${this.slugify(args.title)}`;
+     }
+@@ -1516,11 +1548,13 @@
+       );
+       if (hit?.id) return hit.id;
+     } catch {
++      throwIfCallerAborted();
+     }
+     try {
+       const r = await this.pagesReq("POST", "/folders", { name: name2 });
+       return (await r?.json())?.id;
+     } catch {
++      throwIfCallerAborted();
+       return void 0;
+     }
+   }
+@@ -17544,10 +17578,22 @@
+ }
+ async function syncStatus(client, bank, repoDir) {
+   const gitIds = await client.listDocumentIds("source:git", "all_strict");
+-  const chatIds = await client.listDocumentIds("source:chat", "all_strict").catch(() => /* @__PURE__ */ new Set());
+-  const pages = parsePageList(await client.listPages().catch(() => null));
+-  const activeOps = await client.activeOperations().catch(() => null);
+-  const uploads = await client.listDocumentIds("source:upload", "all_strict").catch(() => /* @__PURE__ */ new Set());
++  const chatIds = await client.listDocumentIds("source:chat", "all_strict").catch(() => {
++    throwIfCallerAborted();
++    return /* @__PURE__ */ new Set();
++  });
++  const pages = parsePageList(await client.listPages().catch(() => {
++    throwIfCallerAborted();
++    return null;
++  }));
++  const activeOps = await client.activeOperations().catch(() => {
++    throwIfCallerAborted();
++    return null;
++  });
++  const uploads = await client.listDocumentIds("source:upload", "all_strict").catch(() => {
++    throwIfCallerAborted();
++    return /* @__PURE__ */ new Set();
++  });
+   const surveyDocs = SURVEY_DOC_IDS.filter((id) => uploads.has(id)).length;
+   let surveyBaseline = null;
+   let surveyCommitsBehind = null;
+@@ -17565,6 +17611,7 @@
+         surveyCommitsBehind = best.behind;
+       }
+     } catch {
++      throwIfCallerAborted();
+     }
+   }
+   const repoName = repoDir ? repoNameOf(repoDir) : void 0;
+@@ -17607,6 +17654,7 @@
+   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+ }
+ function err(e) {
++  throwIfCallerAborted();
+   const message = describeError(e);
+   return { content: [{ type: "text", text: JSON.stringify({ error: message }) }], isError: true };
+ }
+@@ -17778,7 +17826,10 @@
+         return { ok: true, doc_id: docId };
+       })
+     }
+-  ];
++  ].map((spec) => {
++    const handler = spec.handler;
++    return { ...spec, handler: (args, signal) => withCallerSignal(signal, () => handler(args)) };
++  });
+ }
+ 
+ // src/core/retain-cursor.ts
+@@ -18614,6 +18665,7 @@
+     diag(harness, event, { ms: Date.now() - t0, count: hits.length });
+     return hits.length ? formatPageFallback(hits, lead) : null;
+   } catch (e) {
++    throwIfCallerAborted();
+     diag(harness, `${event}_failed`, { ms: Date.now() - t0, error: describeError(e) });
+     return void 0;
+   }
+@@ -18625,6 +18677,7 @@
+     diag(harness, event, { ms: Date.now() - t0, count: observations.length });
+     return observations.length ? formatRecallFallback(observations, lead) : null;
+   } catch (e) {
++    throwIfCallerAborted();
+     diag(harness, `${event}_failed`, { ms: Date.now() - t0, error: describeError(e) });
+     return void 0;
+   }
+@@ -18696,6 +18749,7 @@
+         answer: reflectAnswer.slice(0, 8e3)
+       });
+     } catch (e) {
++      throwIfCallerAborted();
+       reflectAnswer = e instanceof ReflectError && e.permanent ? "" : resolveInjection(void 0, reflectAttempts);
+       reflectFailed = true;
+       log.warn(harness, "reflect failed \u2014 session runs without memory", {
+@@ -18724,6 +18778,7 @@
+       pages = parsePageList(await client.listPages());
+       diag(harness, "pages_ok", { ms: Date.now() - t0, count: pages.length });
+     } catch (e) {
++      throwIfCallerAborted();
+       diag(harness, client.pagesSupported === false ? "pages_unavailable" : "pages_failed", {
+         ms: Date.now() - t0,
+         error: describeError(e)
+@@ -18861,7 +18916,8 @@
+    * intentionally replaces the old in-memory reflect/page state, keeping lifecycle behavior
+    * identical across hosts while this adapter retains only delivery-specific state.
+    */
+-  async onPrompt(sessionId, rawPrompt) {
++  async onPrompt(sessionId, rawPrompt, signal) {
++    signal?.throwIfAborted();
+     if (process.env.HINDSIGHT_DISABLE_HOOKS) return;
+     if (!sessionId) return;
+     const prompt = stripInjectedMemory(rawPrompt).trim();
+@@ -18870,19 +18926,18 @@
+       return;
+     }
+     const turns = (this.turnCount.get(sessionId) ?? 0) + 1;
+-    this.turnCount.set(sessionId, turns);
+     const cacheFile = sessionCacheFile(this.harness, sessionId);
+     if (this.deferInitialReflect) {
+       this.deferInitialReflect = false;
+       writeSessionCache(cacheFile, { deferInitialReflect: true });
+     }
+-    const output = await buildHookOutput({
++    const output = await withCallerSignal(signal, () => buildHookOutput({
+       harness: this.harness,
+       prompt,
+       cfg: this.cfg,
+       client: this.client,
+       cacheFile
+-    });
++    }));
+     const blocks = [];
+     if (turns === 1) {
+       blocks.push(
+@@ -18899,6 +18954,7 @@
+       this.notify?.("Hindsight \xB7 recalled past decisions", preview);
+     }
+     const block = blocks.filter(Boolean).join("\n\n");
++    this.turnCount.set(sessionId, turns);
+     this.injection.set(sessionId, block);
+   }
+   /**
+@@ -19089,40 +19145,14 @@
+ var HARNESS2 = "dsh";
+ var name = HINDSIGHT_PLUGIN;
+ var inject = ["agents"];
+-var workspaces = /* @__PURE__ */ new Map();
+-var liveAgents = /* @__PURE__ */ new Map();
+ function dshSessionEvents(session) {
+-  return session.snapshotEvents?.() ?? session.events ?? [];
++  return session.snapshotEvents();
+ }
+ function ownEvents(session) {
+   return dshSessionEvents(session).slice(session.inheritedEventCount ?? 0);
+ }
+ function workspaceRoot(agent) {
+   return agent.session.header.cwd || process.cwd();
+-}
+-function workspaceFor(root) {
+-  const cached2 = workspaces.get(root);
+-  if (cached2 !== void 0) return cached2 ?? void 0;
+-  const { cfg, bankId, client } = resolveHostMemory(HARNESS2, root);
+-  if (cfg.disabled) {
+-    workspaces.set(root, null);
+-    return void 0;
+-  }
+-  const core = new RuntimeCore(client, bankId, cfg, HARNESS2, root);
+-  core.setTranscriptSource(async (sessionId) => {
+-    const agent = liveAgents.get(sessionId);
+-    return agent ? readDshEvents(ownEvents(agent.session)) : [];
+-  });
+-  const workspace = { core, root };
+-  workspaces.set(root, workspace);
+-  return workspace;
+-}
+-function ensureSeeded(workspace) {
+-  workspace.seeded ??= workspace.core.seedIfCold(workspace.root);
+-}
+-function workspaceForAgent(agent) {
+-  if (agent.session.header.origin === "subagent") return void 0;
+-  return workspaceFor(workspaceRoot(agent));
+ }
+ function promptOf(messages) {
+   return (messages || []).filter((message) => message?.source?.kind === "user").flatMap((message) => message.content || []).filter((block) => block?.type === "text" && block.text).map((block) => block.text).join("\n").trim();
+@@ -19145,7 +19175,7 @@
+   }
+   return void 0;
+ }
+-function createDshHooks(resolve4) {
++function createDshHooks(resolve4, liveAgents = /* @__PURE__ */ new Map()) {
+   return {
+     sessionStart({ agent }) {
+       const workspace = resolve4(agent);
+@@ -19163,7 +19193,8 @@
+       ensureSeeded(workspace);
+       const prompt = promptOf(decision.messages);
+       if (!prompt) return decision;
+-      await workspace.core.onPrompt(sessionId, prompt);
++      await workspace.core.onPrompt(sessionId, prompt, signal);
++      if (signal.aborted) return decision;
+       const injection = workspace.core.getInjection(sessionId);
+       if (!injection) {
+         diag(HARNESS2, "inject_empty", { session: sessionId });
+@@ -19174,7 +19205,7 @@
+         return decision;
+       }
+       diag(HARNESS2, "inject_ok", { session: sessionId, chars: injection.length });
+-      return { kind: "enter", messages: [...decision.messages, injectionMessage(injection)] };
++      return { ...decision, messages: [...decision.messages, injectionMessage(injection)] };
+     },
+     async turnStopping({ agent }) {
+       const workspace = resolve4(agent);
+@@ -19207,17 +19238,50 @@
+   }
+   return { type: "object", properties, ...required2.length ? { required: required2 } : {} };
+ }
+-async function runSpec(spec, args) {
+-  const result = await spec.handler(args);
++async function runSpec(spec, args, signal) {
++  const result = await spec.handler(args, signal);
+   const text = (result.content || []).map((block) => block.text).join("\n");
+   if (result.isError) throw new Error(text || "hindsight tool failed");
+   return text;
+ }
+-function registerTools(toolCtx, fallbackRoot) {
+-  const template = workspaceFor(fallbackRoot);
+-  if (!template) return;
+-  for (const spec of specsOf(template)) {
+-    toolCtx.tools.register({
++function specsOf(workspace) {
++  workspace.tools ??= workspace.core.toolSpecs();
++  return workspace.tools;
++}
++function ensureSeeded(workspace) {
++  workspace.seeded ??= workspace.core.seedIfCold(workspace.root);
++}
++function createDshRuntime() {
++  const workspaces = /* @__PURE__ */ new Map();
++  const liveAgents = /* @__PURE__ */ new Map();
++  let disposed = false;
++  function workspaceFor(root) {
++    if (disposed) return void 0;
++    const cached2 = workspaces.get(root);
++    if (cached2 !== void 0) return cached2 ?? void 0;
++    const { cfg, bankId, client } = resolveHostMemory(HARNESS2, root);
++    if (cfg.disabled) {
++      workspaces.set(root, null);
++      return void 0;
++    }
++    const core = new RuntimeCore(client, bankId, cfg, HARNESS2, root);
++    core.setTranscriptSource(async (sessionId) => {
++      const agent = liveAgents.get(sessionId);
++      return agent ? readDshEvents(ownEvents(agent.session)) : [];
++    });
++    const workspace = { core, root };
++    workspaces.set(root, workspace);
++    return workspace;
++  }
++  function workspaceForAgent(agent) {
++    if (agent.session.header.origin === "subagent") return void 0;
++    return workspaceFor(workspaceRoot(agent));
++  }
++  const hooks = createDshHooks(workspaceForAgent, liveAgents);
++  function toolDefinitions(root) {
++    const template = workspaceFor(root);
++    if (!template) return [];
++    return specsOf(template).map((spec) => ({
+       name: spec.name,
+       description: spec.description,
+       parameters: toDshParameters(spec),
+@@ -19226,39 +19290,52 @@
+         render: (_args, value) => [{ type: "text", text: value }]
+       },
+       async execute(args, exec) {
+-        const workspace = exec?.agent ? workspaceForAgent(exec.agent) : template;
+-        if (!workspace) return "Hindsight memory is disabled for this workspace.";
++        const workspace = exec.agent ? workspaceForAgent(exec.agent) : workspaceFor(root);
++        if (!workspace) throw new Error("Hindsight memory is disabled for this workspace.");
+         const bound = specsOf(workspace).find((candidate) => candidate.name === spec.name);
+-        if (!bound) return `Hindsight tool ${spec.name} is unavailable.`;
+-        return runSpec(bound, args);
+-      }
++        if (!bound) throw new Error(`Hindsight tool ${spec.name} is unavailable.`);
++        return runSpec(bound, args, exec.signal);
++      }
++    }));
++  }
++  async function refresh() {
++    const old = [...workspaces.values()].filter(Boolean);
++    workspaces.clear();
++    await Promise.all(old.map((workspace) => workspace.core.flush()));
++  }
++  async function dispose() {
++    if (disposed) return;
++    disposed = true;
++    const old = [...workspaces.values()].filter(Boolean);
++    workspaces.clear();
++    liveAgents.clear();
++    await Promise.all(old.map((workspace) => workspace.core.flush()));
++  }
++  return { hooks, toolDefinitions, workspaceFor, workspaceForAgent, refresh, dispose };
++}
++function registerTools(toolCtx, root, runtime) {
++  for (const definition of runtime.toolDefinitions(root)) {
++    toolCtx.tools.register(definition, {
++      when: ({ agent }) => runtime.workspaceForAgent(agent) !== void 0
+     });
+   }
+-  const exposed = toolCtx.tools.schemas?.() ?? [];
+-  log.debug(HARNESS2, "tools registered", {
+-    count: specsOf(template).length,
+-    hostCatalog: exposed.length,
+-    hindsight: exposed.filter((schema) => schema.name?.startsWith("hindsight_")).length
+-  });
+-}
+-function specsOf(workspace) {
+-  workspace.tools ??= workspace.core.toolSpecs();
+-  return workspace.tools;
+ }
+ function apply(ctx) {
+-  const hooks = createDshHooks(workspaceForAgent);
+-  ctx.on("agent/session-start", hooks.sessionStart);
+-  ctx.on("agent/pre-step", hooks.preStep, { prepend: true });
+-  ctx.on("agent/turn-stopping", hooks.turnStopping);
+-  ctx.on("agent/disposed", hooks.disposed);
++  const runtime = createDshRuntime();
++  ctx.on("agent/created", runtime.hooks.sessionStart);
++  ctx.on("agent/pre-step", runtime.hooks.preStep, { prepend: true });
++  ctx.on("agent/turn-stopping", runtime.hooks.turnStopping);
++  ctx.on("agent/disposed", runtime.hooks.disposed);
+   ctx.inject(["tools"], (toolCtx) => {
+-    registerTools(toolCtx, process.cwd());
+-  });
++    registerTools(toolCtx, process.cwd(), runtime);
++  });
++  ctx.effect(() => () => runtime.dispose());
+ }
+ var dsh_default = { name, inject, apply };
+ export {
+   apply,
+   createDshHooks,
++  createDshRuntime,
+   dsh_default as default,
+   dshSessionEvents,
+   inject,
+--- a/package.json
++++ b/package.json
+@@ -8,6 +8,9 @@
+   },
+   "description": "Reflect-only Hindsight long-term memory for coding agents (harness-pluggable: opencode, …), with automatic background ingestion (no setup CLI).",
+   "type": "module",
++  "engines": {
++    "dsh": "0.2.2-rc.1"
++  },
+   "main": "dist/index.js",
+   "types": "dist/index.d.ts",
+   "bin": {
+@@ -93,6 +96,7 @@
+     "clean": "rm -rf dist",
+     "prepublishOnly": "npm run clean && npm run skill:build && npm run build",
+     "test": "vitest run --exclude '**/*.e2e.test.ts'",
++    "test:dsh": "node --test --test-isolation=none tests/*.test.mjs",
+     "test:dcode-e2e": "npm run build && HINDSIGHT_DCODE_E2E=1 vitest run src/dcode-plugin.e2e.test.ts",
+     "test:harness-e2e": "npm run build && HINDSIGHT_HARNESS_E2E=1 vitest run src/harness.e2e.test.ts"
+   },
+--- a/README.md
++++ b/README.md
+@@ -370,6 +370,19 @@
+ too: the package ships the profile patch layer, so nothing else needs editing. Either route gets the
+ companion skill — a plugin wired by the host's own plugin manager installs it itself on the first
+ session, since that route never runs our installer.
++
++This local DSH adapter is tested against `0.2.2-rc.1`, as declared in `engines.dsh`.
++Run `npm run test:dsh` with the installed DSH CLI available on `PATH` to check the adapter,
++conditional tool registration, configuration refresh, and cancellation contracts offline.
++The tests use temporary configuration and simulated memory requests.
++
++The adapter exports `createDshRuntime()` for the local `dsh-hindsight-manager` integration.
++Each runtime owns its workspace cache and hooks. After saving memory configuration, the manager
++refreshes that runtime before reporting success, so subsequent calls resolve the saved bank and
++server for their session workspace. Calls already in progress retain the configuration with which
++they began. Runtime disposal releases session references and drains outstanding transcript writes.
++The existing session snapshot reader remains on the host's deprecated API; migrating that reader
++to a session projection is separate from these compatibility fixes.
+ 
+ #### <img src="https://hindsight.vectorize.io/img/harness/workbuddy.png" alt="" width="20" height="20" /> WorkBuddy
+ 
+--- /dev/null
++++ b/tests/load-adapter.mjs
+@@ -0,0 +1,35 @@
++import { readFile } from 'node:fs/promises';
++import vm from 'node:vm';
++
++export async function loadAdapter(overrides = {}) {
++  const bundle = await readFile(new URL('../dist/dsh.js', import.meta.url), 'utf8');
++  const source = bundle.slice(bundle.lastIndexOf('// src/dsh.ts'), bundle.indexOf('/*! Bundled license information:'));
++  const context = vm.createContext({
++    HINDSIGHT_PLUGIN: 'hindsight',
++    process: { cwd: () => '/workspace' },
++    randomUUID2: () => 'injection-id',
++    diag() {},
++    log: { debug() {} },
++    readDshEvents: (events) => events,
++    ...overrides,
++  });
++  const exports = source.match(/export \{([\s\S]*?)\};/)[1].trim().split(',').filter((entry) => entry.trim()).map((entry) => {
++    const [local, exported] = entry.trim().split(/\s+as\s+/);
++    return `${JSON.stringify(exported ?? local)}: ${local}`;
++  });
++  vm.runInContext(source.replace(/export \{[\s\S]*?\};/, `globalThis.adapter = {${exports.join(',')}};`), context);
++  return context.adapter;
++}
++
++export function agentFor(root = '/workspace', id = 'session') {
++  const events = [];
++  return { session: { header: { cwd: root, id, origin: 'user' }, events, snapshotEvents: () => events } };
++}
++
++export function enterDecision() {
++  return {
++    kind: 'enter',
++    startsRequestSeries: true,
++    messages: [{ source: { kind: 'user' }, content: [{ type: 'text', text: 'Remember the design' }] }],
++  };
++}
+--- /dev/null
++++ b/tests/dsh-adapter.test.mjs
+@@ -0,0 +1,168 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { agentFor, enterDecision, loadAdapter } from './load-adapter.mjs';
++
++async function runtimeFixture() {
++  const state = { bank: 'before', apiUrl: 'http://before.local', disabled: false };
++  const cores = [];
++  class RuntimeCore {
++    constructor(client, bankId, cfg) {
++      Object.assign(this, { client, bankId, cfg, seeded: 0, flushed: 0 });
++      cores.push(this);
++    }
++    setTranscriptSource(read) { this.readTranscript = read; }
++    seedIfCold() { this.seeded++; return Promise.resolve(); }
++    async onPrompt() {}
++    getInjection() { return 'memory'; }
++    async onSessionIdle() {}
++    async flush() { this.flushed++; }
++    toolSpecs() {
++      return [{
++        name: 'hindsight_recall', description: 'Recall', inputSchema: {},
++        handler: async (_args, signal) => {
++          this.toolSignal = signal;
++          return { content: [{ text: `${this.bankId}@${this.client.apiUrl}` }] };
++        },
++      }];
++    }
++  }
++  const adapter = await loadAdapter({
++    RuntimeCore,
++    resolveHostMemory: () => ({ cfg: { disabled: state.disabled }, bankId: state.bank, client: { apiUrl: state.apiUrl } }),
++  });
++  const context = () => {
++    const events = new Map();
++    const tools = [];
++    const disposers = [];
++    return {
++      events, tools, disposers,
++      on(name, listener) { events.set(name, listener); },
++      effect(effect) { const dispose = effect(); disposers.push(dispose); return dispose; },
++      inject(_dependencies, callback) {
++        callback({
++          tools: { register(definition, options) { tools.push({ definition, options }); return () => {}; }, schemas: () => [] },
++          effect(effect) { const dispose = effect(); disposers.push(dispose); return dispose; },
++        });
++      },
++    };
++  };
++  return { adapter, state, cores, context };
++}
++
++test('memory injection preserves the host request-series boundary', async () => {
++  const adapter = await loadAdapter();
++  const core = { seedIfCold() {}, async onPrompt() {}, getInjection: () => 'remembered design' };
++  const hooks = adapter.createDshHooks(() => ({ core, root: '/workspace' }));
++  const result = await hooks.preStep({ agent: agentFor(), signal: new AbortController().signal }, async () => enterDecision());
++  assert.equal(result.startsRequestSeries, true);
++  assert.equal(result.messages.at(-1).content[0].text, 'remembered design');
++});
++
++test('stopping a step reaches recall and prevents late memory injection', async () => {
++  const adapter = await loadAdapter();
++  const controller = new AbortController();
++  let receivedSignal;
++  const core = {
++    seedIfCold() {},
++    async onPrompt(_session, _prompt, signal) {
++      receivedSignal = signal;
++      controller.abort();
++    },
++    getInjection: () => 'late memory',
++  };
++  const decision = enterDecision();
++  const hooks = adapter.createDshHooks(() => ({ core, root: '/workspace' }));
++  const result = await hooks.preStep({ agent: agentFor(), signal: controller.signal }, async () => decision);
++  assert.equal(receivedSignal, controller.signal);
++  assert.equal(result, decision);
++});
++
++test('host agent creation starts the workspace once', async () => {
++  const { adapter, cores, context } = await runtimeFixture();
++  const ctx = context();
++  adapter.apply(ctx);
++  assert.equal(typeof ctx.events.get('agent/created'), 'function');
++  ctx.events.get('agent/created')({ agent: agentFor() });
++  ctx.events.get('agent/created')({ agent: agentFor('/workspace', 'second-session') });
++  assert.equal(cores[0].seeded, 1);
++});
++
++test('tool execution passes the host cancellation signal to the page tool', async () => {
++  const { adapter, cores } = await runtimeFixture();
++  const runtime = adapter.createDshRuntime();
++  const tool = runtime.toolDefinitions('/workspace')[0];
++  const signal = new AbortController().signal;
++  assert.equal(await tool.execute({}, { agent: agentFor(), signal }), 'before@http://before.local');
++  assert.equal(cores[0].toolSignal, signal);
++});
++
++test('saving a new bank and endpoint takes effect for existing and new sessions', async () => {
++  const { adapter, state, cores } = await runtimeFixture();
++  const runtime = adapter.createDshRuntime();
++  const tool = runtime.toolDefinitions('/workspace')[0];
++  const signal = new AbortController().signal;
++  const agent = agentFor();
++  assert.equal(await tool.execute({}, { agent, signal }), 'before@http://before.local');
++  Object.assign(state, { bank: 'after', apiUrl: 'http://after.local' });
++  await runtime.refresh();
++  assert.equal(cores[0].flushed, 1);
++  assert.equal(await tool.execute({}, { agent, signal }), 'after@http://after.local');
++  assert.equal(await tool.execute({}, { agent: agentFor('/workspace', 'new-session'), signal }), 'after@http://after.local');
++  state.disabled = true;
++  await runtime.refresh();
++  assert.equal(runtime.workspaceForAgent(agent), undefined);
++  await assert.rejects(tool.execute({}, { agent, signal }), /disabled/);
++  state.disabled = false;
++  await runtime.refresh();
++  assert.equal(await tool.execute({}, { agent, signal }), 'after@http://after.local');
++});
++
++test('standalone tool execution keeps the explicit root binding across refresh', async () => {
++  const { adapter, state } = await runtimeFixture();
++  const runtime = adapter.createDshRuntime();
++  const tool = runtime.toolDefinitions('/workspace')[0];
++  const signal = new AbortController().signal;
++  assert.equal(await tool.execute({}, { signal }), 'before@http://before.local');
++  state.bank = 'after';
++  await runtime.refresh();
++  assert.equal(await tool.execute({}, { signal }), 'after@http://before.local');
++});
++
++test('plugin instances keep independent configuration and live transcripts', async () => {
++  const { adapter, state, cores, context } = await runtimeFixture();
++  const first = context();
++  adapter.apply(first);
++  const agent = agentFor();
++  agent.session.events.push({ type: 'user/message', data: 'private to first instance' });
++  first.events.get('agent/created')({ agent });
++  state.bank = 'second';
++  const second = context();
++  adapter.apply(second);
++  const secondAgent = agentFor();
++  second.events.get('agent/created')({ agent: secondAgent });
++  assert.equal(cores.length, 2);
++  assert.equal(cores[0].bankId, 'before');
++  assert.equal(cores[1].bankId, 'second');
++  assert.equal((await cores[0].readTranscript('session')).length, 1);
++  assert.equal((await cores[1].readTranscript('session')).length, 0);
++  await first.disposers[0]();
++  assert.equal(cores[0].flushed, 1);
++  assert.equal((await cores[0].readTranscript('session')).length, 0);
++  assert.equal(cores[1].flushed, 0);
++  const secondTool = second.tools[0].definition;
++  assert.equal(await secondTool.execute({}, { agent: secondAgent, signal: new AbortController().signal }), 'second@http://before.local');
++});
++
++test('tools expose availability through registration options and exclude subagents', async () => {
++  const { adapter, state, context } = await runtimeFixture();
++  const ctx = context();
++  adapter.apply(ctx);
++  const registration = ctx.tools[0];
++  assert.equal(registration.definition.when, undefined);
++  assert.equal(registration.options.when({ agent: agentFor() }), true);
++  const subagent = agentFor();
++  subagent.session.header.origin = 'subagent';
++  assert.equal(registration.options.when({ agent: subagent }), false);
++  state.disabled = true;
++  assert.equal(registration.options.when({ agent: agentFor('/disabled') }), false);
++});
+--- /dev/null
++++ b/tests/dsh-cancellation.test.mjs
+@@ -0,0 +1,267 @@
++import assert from 'node:assert/strict';
++import { AsyncLocalStorage } from 'node:async_hooks';
++import { readFile } from 'node:fs/promises';
++import { setTimeout as sleepWithSignal } from 'node:timers/promises';
++import test from 'node:test';
++import vm from 'node:vm';
++
++const bundlePath = new URL('../dist/dsh.js', import.meta.url);
++
++async function loadRuntime(overrides = {}) {
++  const bundle = await readFile(bundlePath, 'utf8');
++  const section = (start, end) => {
++    const from = bundle.indexOf(start);
++    return bundle.slice(from, bundle.indexOf(end, from));
++  };
++  const source = [
++    section('// src/core/hindsight.ts', '// src/core/config.ts'),
++    section('async function syncStatus(', '// src/core/retain-cursor.ts'),
++    section('// src/core/hook.ts', '// src/core/transcript-dsh.ts'),
++  ].join('\n').replace(/^import .*;\n/gm, '');
++  const schema = { describe() { return this; }, optional() { return this; } };
++  let cache = {};
++  const writes = [];
++  const context = vm.createContext({
++    AsyncLocalStorage, sleepWithSignal, AbortController, AbortSignal,
++    setTimeout, clearTimeout, Response, Headers,
++    process: { env: {}, cwd: () => '/workspace' },
++    version: 'test',
++    external_exports: { string: () => schema },
++    describeError: (error) => error.message,
++    setLogLevel() {},
++    memoryCursorStore: () => new Map(),
++    memoryUsageCursorStore: () => new Map(),
++    stripInjectedMemory: (prompt) => prompt,
++    sessionCacheFile: () => '/fake/session-cache',
++    readSessionCache: () => cache,
++    writeSessionCache: (_, next) => { cache = { ...cache, ...next }; writes.push(next); },
++    buildReflectQuery: (prompt) => prompt,
++    buildSystemInjection: (memory) => memory,
++    buildPagesPreamble: () => 'first-turn guide',
++    buildPageTrigger: () => ({ type: 'manual' }),
++    parsePageList: (pages) => pages.items,
++    brandWord: () => 'Hindsight',
++    diag() {},
++    diagFilePath: () => '/fake/diagnostics',
++    log: { warn() {}, info() {} },
++    fetch() { throw new Error('unexpected fetch'); },
++    ...overrides,
++  });
++  vm.runInContext(`${source}\nglobalThis.api = { HindsightClient, RuntimeCore, buildPageTools };`, context);
++  const client = new context.api.HindsightClient({
++    apiUrl: 'http://memory.test', bank: 'test-bank',
++    rateLimitPatienceMs: 60_000,
++  });
++  const tools = new Map(context.api.buildPageTools(client, 'test-bank', {
++    repoDir: '/workspace', reflectTimeoutMs: 1_000,
++  }).map((spec) => [spec.name, spec]));
++  const core = new context.api.RuntimeCore(client, 'test-bank', {
++    autoInject: 'reflect', reflectTimeoutMs: 1_000,
++    injectTimeoutMs: 1_000, pageRefreshEveryTurns: 0,
++  }, 'dsh', '/workspace');
++  return { client, core, tools, writes };
++}
++
++function pendingRequest(init) {
++  let resolve;
++  const promise = new Promise((yes, no) => {
++    resolve = yes;
++    init.signal.addEventListener('abort', () => no(init.signal.reason), { once: true });
++  });
++  return { promise, resolve, signal: init.signal };
++}
++
++function outcome(promise) {
++  return promise.then((value) => ({ value }), (error) => ({ error }));
++}
++
++async function settleMicrotasks() {
++  await new Promise((resolve) => setImmediate(resolve));
++}
++
++test('concurrent calls sharing a client isolate cancellation and preserve its reason', async () => {
++  const requests = [];
++  const { tools } = await loadRuntime({ fetch: (_, init) => {
++    const request = pendingRequest(init);
++    requests.push(request);
++    return request.promise;
++  } });
++  const first = new AbortController();
++  const second = new AbortController();
++  const tool = tools.get('hindsight_reflect');
++  const firstResult = outcome(tool.handler({ query: 'first' }, first.signal));
++  const secondResult = outcome(tool.handler({ query: 'second' }, second.signal));
++  const reason = new Error('first call stopped');
++  first.abort(reason);
++  assert.equal(requests[0].signal.aborted, true);
++  assert.equal(requests[1].signal.aborted, false);
++  requests[1].resolve(Response.json({ text: 'second succeeds' }));
++  assert.equal((await firstResult).error, reason);
++  assert.equal(JSON.parse((await secondResult).value.content[0].text), 'second succeeds');
++});
++
++test('an already aborted tool call performs no request', async () => {
++  let requests = 0;
++  const { tools } = await loadRuntime({ fetch: async () => {
++    requests++;
++    return Response.json({ roots: [] });
++  } });
++  const controller = new AbortController();
++  const reason = new Error('already stopped');
++  controller.abort(reason);
++  await assert.rejects(tools.get('hindsight_list_pages').handler({}, controller.signal), (error) => error === reason);
++  assert.equal(requests, 0);
++});
++
++test('caller cancellation also interrupts response body parsing', async () => {
++  let received;
++  const { tools } = await loadRuntime({ fetch: async (_, init) => {
++    received = init.signal;
++    return { ok: true, status: 200, json: () => new Promise((resolve, reject) => {
++      received.addEventListener('abort', () => reject(received.reason), { once: true });
++    }) };
++  } });
++  const controller = new AbortController();
++  const result = outcome(tools.get('hindsight_list_pages').handler({}, controller.signal));
++  await settleMicrotasks();
++  const reason = new Error('body stopped');
++  controller.abort(reason);
++  assert.equal(received.aborted, true);
++  assert.equal((await result).error, reason);
++});
++
++test('cancellation during credential refresh stops the 401 replay', async () => {
++  const controller = new AbortController();
++  const reason = new Error('refresh stopped');
++  let requests = 0;
++  const { client, tools } = await loadRuntime({ fetch: async () => {
++    requests++;
++    return new Response('', { status: 401 });
++  } });
++  client.tokenProvider = () => { controller.abort(reason); return 'new-token'; };
++  await assert.rejects(tools.get('hindsight_list_pages').handler({}, controller.signal), (error) => error === reason);
++  assert.equal(requests, 1);
++});
++
++test('a replayed 401 request retains caller cancellation', async () => {
++  let request;
++  let calls = 0;
++  const { client, tools } = await loadRuntime({ fetch: async (_, init) => {
++    if (++calls === 1) return new Response('', { status: 401 });
++    request = pendingRequest(init);
++    return request.promise;
++  } });
++  client.tokenProvider = () => 'new-token';
++  const controller = new AbortController();
++  const result = outcome(tools.get('hindsight_list_pages').handler({}, controller.signal));
++  await settleMicrotasks();
++  const reason = new Error('replay stopped');
++  controller.abort(reason);
++  assert.equal(request.signal.aborted, true);
++  assert.equal((await result).error, reason);
++  assert.equal(calls, 2);
++});
++
++test('rate-limit backoff is cancellable and never retries after cancellation', async () => {
++  let requests = 0;
++  let enteredBackoff;
++  const backoffEntered = new Promise((resolve) => { enteredBackoff = resolve; });
++  const { tools } = await loadRuntime({
++    fetch: async () => { requests++; return new Response('', { status: 429 }); },
++    sleepWithSignal: (...args) => { enteredBackoff(); return sleepWithSignal(...args); },
++  });
++  const controller = new AbortController();
++  const result = outcome(tools.get('hindsight_list_pages').handler({}, controller.signal));
++  await backoffEntered;
++  const reason = new Error('backoff stopped');
++  controller.abort(reason);
++  assert.equal((await result).error, reason);
++  assert.equal(requests, 1);
++});
++
++test('cancelled automatic reflection stops fallbacks and preserves first-turn state', async () => {
++  const requests = [];
++  let pending;
++  let cancelNext = true;
++  const { core, writes } = await loadRuntime({ fetch: async (url, init) => {
++    requests.push(url);
++    if (cancelNext) {
++      pending = pendingRequest(init);
++      return pending.promise;
++    }
++    return Response.json(url.endsWith('/reflect') ? { text: 'memory' } : { roots: [] });
++  } });
++  const controller = new AbortController();
++  const result = outcome(core.onPrompt('session', 'remember', controller.signal));
++  const reason = new Error('prompt stopped');
++  controller.abort(reason);
++  assert.equal(pending.signal.aborted, true);
++  assert.equal((await result).error, reason);
++  assert.equal(requests.length, 1);
++  assert.equal(writes.length, 0);
++  assert.equal(core.turnCount.has('session'), false);
++  assert.equal(core.getInjection('session'), undefined);
++  cancelNext = false;
++  await core.onPrompt('session', 'remember', new AbortController().signal);
++  assert.equal(core.turnCount.get('session'), 1);
++  assert.match(core.getInjection('session'), /first-turn guide/);
++});
++
++test('cancellation inside the page fallback stops recall and page-roster requests', async () => {
++  const requests = [];
++  let pending;
++  const { core, writes } = await loadRuntime({ fetch: async (url, init) => {
++    requests.push(url);
++    if (url.endsWith('/reflect')) return new Response('temporarily unavailable', { status: 503 });
++    pending = pendingRequest(init);
++    return pending.promise;
++  } });
++  const controller = new AbortController();
++  const result = outcome(core.onPrompt('session', 'remember', controller.signal));
++  await settleMicrotasks();
++  assert.equal(requests.length, 2);
++  assert.match(requests[1], /\/pages\/search\?/);
++  const reason = new Error('fallback stopped');
++  controller.abort(reason);
++  assert.equal(pending.signal.aborted, true);
++  assert.equal((await result).error, reason);
++  assert.equal(requests.length, 2);
++  assert.equal(writes.length, 0);
++});
++
++test('cancelled initiative folder lookup cannot continue to write requests', async () => {
++  const requests = [];
++  const { tools } = await loadRuntime({ fetch: (url, init) => {
++    requests.push({ url, method: init.method });
++    return pendingRequest(init).promise;
++  } });
++  const controller = new AbortController();
++  const result = outcome(tools.get('hindsight_capture_initiative').handler({
++    title: 'Example', summary: 'Example initiative',
++  }, controller.signal));
++  const reason = new Error('capture stopped');
++  controller.abort(reason);
++  assert.equal((await result).error, reason);
++  assert.deepEqual(requests.map(({ method }) => method), ['GET']);
++});
++
++test('ordinary request errors still produce the existing tool error result', async () => {
++  const { tools } = await loadRuntime({ fetch: async () => { throw new Error('connection failed'); } });
++  const result = await tools.get('hindsight_list_pages').handler({}, new AbortController().signal);
++  assert.equal(result.isError, true);
++  assert.equal(JSON.parse(result.content[0].text).error, 'connection failed');
++});
++
++test('a tool deadline still aborts the request when its caller remains active', async () => {
++  let received;
++  const { tools } = await loadRuntime({ fetch: (_, init) => {
++    received = init.signal;
++    return pendingRequest(init).promise;
++  } });
++  const controller = new AbortController();
++  const result = await tools.get('hindsight_reflect').handler({ query: 'remember' }, controller.signal);
++  assert.equal(received.aborted, true);
++  assert.equal(controller.signal.aborted, false);
++  assert.equal(result.isError, true);
++  assert.match(JSON.parse(result.content[0].text).error, /reflect timed out/);
++});

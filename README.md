@@ -4,9 +4,13 @@
 官方插件负责记忆工具、检索、上下文注入、会话回写和自身版本更新；管理器负责服务地址、
 工作区到记忆库的映射、启用范围与回写选项。
 
-管理器通过读写官方配置文件协作，不导入、打包或修改官方运行时，不注册记忆工具或订阅
+管理器通过读写官方配置文件协作，不导入或自动修改官方运行时，不注册记忆工具或订阅
 Agent 会话事件。两个插件安装在同一个 DSH profile 中，分别通过插件市场或插件管理命令更新。
 本仓库不跟踪上游版本，也没有上游同步定时任务。
+
+仓库另附[每轮主动召回的运行时补丁](runtime-patches/README.md)，将每个用户回合的自动检索、
+上下文注入和回复后的自动保存连成长期记忆闭环。补丁针对官方插件 `0.8.7`，包含配置文件和
+回归测试，可离线应用。**只更新管理器不会自动启用这项能力**，请按补丁说明应用并重启 DSH。
 
 已验证管理器的宿主加载与配置接口：**DSH 0.2.2-rc.1**，需要 **Node.js ≥ 24.9.0**。
 官方记忆插件与 DSH、Hindsight 服务的版本兼容性遵循官方说明。
@@ -30,7 +34,7 @@ dsh plugin --profile web add github:moshangssh/dsh-hindsight-manager
 dsh plugin --profile web add ./dsh-hindsight-manager-0.2.0.tgz --offline
 ```
 
-这个安装包只包含管理界面。Node.js、DSH、官方 Hindsight 插件和可访问的 Hindsight 服务
+这个安装包包含管理界面及可手动应用的运行时补丁。Node.js、DSH、官方 Hindsight 插件和可访问的 Hindsight 服务
 需要预先准备；官方插件按 DSH 提供的离线包或缓存安装方式部署。
 
 ## 配置与生效
@@ -79,8 +83,8 @@ dsh plugin --profile web add ./dsh-hindsight-manager-0.2.0.tgz --offline
    移除该禁用设置，或将其改为 `false`。
 4. 重启 DSH 并刷新浏览器。
 
-原有 `coding-agent.json` 和 Hindsight 服务端记忆库继续使用。本管理器不包含此前的官方
-运行时兼容补丁；官方插件自身的问题通过其版本更新解决。
+原有 `coding-agent.json` 和 Hindsight 服务端记忆库继续使用。管理器不会自动应用官方
+运行时兼容补丁；需要本地修订时，使用仓库的 `runtime-patches/` 中的补丁和说明。
 
 卸载管理器只移除设置面板，官方记忆插件仍可独立使用：
 
