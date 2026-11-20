@@ -31,7 +31,7 @@ dsh plugin --profile web add github:moshangssh/dsh-hindsight-manager
 部署机器不能连接外网时，在开发机器进入本仓库执行 `npm pack`，传入安装包：
 
 ```bash
-dsh plugin --profile web add ./dsh-hindsight-manager-0.2.1.tgz --offline
+dsh plugin --profile web add ./dsh-hindsight-manager-0.2.2.tgz --offline
 ```
 
 这个安装包包含管理界面及可手动应用的运行时补丁。Node.js、DSH、官方 Hindsight 插件和可访问的 Hindsight 服务
@@ -63,6 +63,8 @@ dsh plugin --profile web add ./dsh-hindsight-manager-0.2.1.tgz --offline
 
 `apiUrl` 填 REST 根地址，不带 `/mcp`。服务需要认证时，在顶层或 `harnesses.dsh` 中设置
 `apiToken`；面板的连接测试和库列表请求会使用该 Token，页面只显示是否已配置。
+已有 daemon 配置时，保存其他设置会保留 daemon 模式；将服务地址改为另一地址并保存时，
+DSH 配置切换为 `self-hosted`，重启后使用新地址。
 连接测试使用第一个已保存的工作区映射。页面中的目录状态表示目录是否存在，记忆库的运行时
 解析由官方插件负责；`paths`、`banks` 等高级覆盖继续在官方配置文件中管理。
 

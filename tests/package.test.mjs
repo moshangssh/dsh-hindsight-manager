@@ -28,7 +28,7 @@ test('packed bundle imports in DSH without the source checkout or local peer lin
     assert.equal(manifest.exports['./runtime'], undefined);
     assert.equal(manifest.dependencies?.['@vectorize-io/hindsight-coding-agents'], undefined);
     assert.ok(existsSync(join(packed, 'manager.config.json')));
-    for (const file of ['README.md', '0001-dsh-compatibility.patch', '0002-active-memory.patch']) {
+    for (const file of ['README.md', '0001-dsh-compatibility.patch', '0002-active-memory.patch', '0003-review-fixes.patch']) {
       assert.ok(existsSync(join(packed, 'runtime-patches', file)), `${file} must ship for offline use`);
     }
     const plugin = await import(pathToFileURL(join(packed, 'index.js')));

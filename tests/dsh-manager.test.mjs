@@ -175,6 +175,44 @@ test('daemon connection settings inherit the DSH port without starting a daemon'
   assert.equal(f.requests[0].url, 'http://127.0.0.1:12345/v1/default/banks');
 });
 
+test('changing the daemon URL selects self-hosted mode and uses the new service after reload', async (t) => {
+  for (const initial of [
+    { serverMode: 'daemon', apiPort: 12345 },
+    { serverMode: 'cloud', harnesses: { dsh: { serverMode: 'daemon', apiPort: 12345 } } },
+  ]) {
+    await t.test(initial.harnesses ? 'DSH mode' : 'inherited mode', async (t) => {
+      const f = await fixture(t, { ...initial, mapPathToBank: { '/tmp': 'shared' } });
+      const { body } = await f.request('save', 'POST', { apiUrl: '  http://new-memory.invalid/  ' });
+      assert.equal(body.ok, true);
+      assert.equal(body.settings.serverMode, 'self-hosted');
+      assert.equal(body.settings.apiUrl, 'http://new-memory.invalid/');
+      assert.equal(JSON.parse(readFileSync(f.configPath, 'utf8')).harnesses.dsh.serverMode, 'self-hosted');
+      await f.reload();
+      assert.equal((await f.request('state')).body.apiUrl, 'http://new-memory.invalid/');
+      await f.request('banks');
+      await f.request('test', 'POST');
+      assert.deepEqual(f.requests.map(({ url }) => url), [
+        'http://new-memory.invalid/v1/default/banks',
+        'http://new-memory.invalid/v1/default/banks/shared/documents?limit=1',
+      ]);
+    });
+  }
+});
+
+test('saving other settings or the current daemon URL keeps daemon mode', async (t) => {
+  const f = await fixture(t, { serverMode: 'daemon', apiPort: 12345 });
+  for (const patch of [
+    { retainSessions: false },
+    { apiUrl: 'http://127.0.0.1:12345' },
+    { apiUrl: ' http://127.0.0.1:12345/ ' },
+  ]) {
+    const { body } = await f.request('save', 'POST', patch);
+    assert.equal(body.settings.serverMode, 'daemon');
+    assert.equal(body.settings.apiUrl, 'http://127.0.0.1:12345');
+    assert.equal(JSON.parse(readFileSync(f.configPath, 'utf8')).harnesses.dsh.serverMode, undefined);
+  }
+});
+
 test('connection failures remain visible to the settings panel', async (t) => {
   const f = await fixture(t, { apiUrl: 'http://memory.invalid', mapPathToBank: { '/tmp': 'shared' } });
   globalThis.fetch = async () => new Response('service unavailable', { status: 503 });

@@ -6,7 +6,7 @@ window.__ModuleLoader__.load({
 
     const React = require('react');
     const h = React.createElement;
-    const { useEffect, useState, useCallback } = React;
+    const { useEffect, useState, useCallback, useRef } = React;
 
     const NS = 'hindsight-manager';
 
@@ -143,6 +143,7 @@ window.__ModuleLoader__.load({
       const [probe, setProbe] = useState(undefined);
       const [bankList, setBankList] = useState(undefined);
       const [draft, setDraft] = useState(undefined);
+      const nextRowId = useRef(0);
 
       const load = useCallback(async () => {
         setError(undefined);
@@ -153,7 +154,7 @@ window.__ModuleLoader__.load({
           setState(body);
           setDraft({
             apiUrl: body.apiUrl,
-            positions: body.positions.map((row) => ({ dir: row.dir, bank: row.bank })),
+            positions: body.positions.map((row) => ({ id: nextRowId.current++, dir: row.dir, bank: row.bank })),
             optInOnly: body.optInOnly,
             retainSessions: body.retainSessions,
           });
@@ -209,7 +210,7 @@ window.__ModuleLoader__.load({
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
               apiUrl: draft.apiUrl,
-              positions: draft.positions,
+              positions: draft.positions.map(({ dir, bank }) => ({ dir, bank })),
               optInOnly: draft.optInOnly,
               retainSessions: draft.retainSessions,
             }),
@@ -238,7 +239,8 @@ window.__ModuleLoader__.load({
       };
 
       const addRow = (dir, bank) => {
-        setDraft((current) => ({ ...current, positions: [...current.positions, { dir: dir ?? '', bank: bank ?? '' }] }));
+        const row = { id: nextRowId.current++, dir: dir ?? '', bank: bank ?? '' };
+        setDraft((current) => ({ ...current, positions: [...current.positions, row] }));
       };
 
       const removeRow = (index) => {
@@ -345,7 +347,7 @@ window.__ModuleLoader__.load({
                 draft.positions.map((row, index) =>
                   h(
                     'div',
-                    { className: 'hm-item', key: `${row.dir}-${index}` },
+                    { className: 'hm-item', key: row.id },
                     h('input', {
                       className: 'hm-input hm-mono',
                       value: row.dir,

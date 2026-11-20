@@ -1,0 +1,603 @@
+--- a/dist/dsh.js
++++ b/dist/dsh.js
+@@ -974,6 +974,8 @@
+     const body = { items: [item], async: true };
+     if (opts.operationId) body.operation_id = opts.operationId;
+     const r = await this.req("POST", this.bankUrl("/memories"), body);
++    if (!r.ok)
++      throw new Error(`POST ${this.bankUrl("/memories")} -> ${r.status} ${await r.text()}`);
+     try {
+       const j = await r.json();
+       if (j.operation_id) this.opIds.push(j.operation_id);
+@@ -18089,7 +18091,7 @@
+   }
+   cursors?.write(sessionId, { ...accepted(), pending: queue });
+   for (let i = 0; i < queue.length; i++) {
+-    if (i > 0 && Date.now() + REQUEST_BUDGET_MS > retryUntil) return;
++    if (i > 0 && Date.now() + REQUEST_BUDGET_MS > retryUntil) throw new Error("Retain retry budget exhausted with pending appends");
+     const entry = queue[i];
+     await submitWithRetry(
+       () => submit(entry.content, entry.operationId, true),
+@@ -19028,7 +19030,6 @@
+     if (!this.writeBackEnabled) return;
+     const st = this.stateFor(sessionId);
+     if (turns.length <= st.retainedTurns) return;
+-    st.retainedTurns = turns.length;
+     this.retain(sessionId, turns, st.startTs, "idle");
+   }
+   recordUsage(sessionId, turns, lastTurnComplete) {
+@@ -19048,7 +19049,7 @@
+   stateFor(sessionId) {
+     let st = this.sessionState.get(sessionId);
+     if (!st) {
+-      st = { startTs: (/* @__PURE__ */ new Date()).toISOString(), retainedTurns: 0 };
++      st = { startTs: (/* @__PURE__ */ new Date()).toISOString(), retainedTurns: 0, writeBack: Promise.resolve() };
+       this.sessionState.set(sessionId, st);
+     }
+     return st;
+@@ -19073,8 +19074,12 @@
+   /** Fire-and-forget upsert of the session transcript; never throws into the host. */
+   retain(sessionId, turns, startTs, trigger = "turn") {
+     const t0 = Date.now();
+-    const write2 = ensureDaemon(this.cfg, this.harness, { waitMs: DAEMON_WAIT_RETAIN_MS }).then(
+-      () => retainLiveSession(this.client, sessionId, turns, startTs, this.harness, {
++    const st = this.stateFor(sessionId);
++    const write2 = st.writeBack.then(async () => {
++      // Recheck after earlier writes settle: duplicate stops and older snapshots may have queued.
++      if (trigger === "idle" && turns.length <= st.retainedTurns) return;
++      await ensureDaemon(this.cfg, this.harness, { waitMs: DAEMON_WAIT_RETAIN_MS });
++      await retainLiveSession(this.client, sessionId, turns, startTs, this.harness, {
+         cursors: this.cursors,
+         stamp: buildRetainStamp(this.cfg, {
+           directory: this.projectDir,
+@@ -19082,15 +19087,15 @@
+           bankId: this.bankId,
+           sessionId
+         })
+-      })
+-    ).then(
+-      () => diag(this.harness, "retain_ok", {
++      });
++      if (trigger === "idle") st.retainedTurns = Math.max(st.retainedTurns, turns.length);
++      diag(this.harness, "retain_ok", {
+         ms: Date.now() - t0,
+         turns: turns.length,
+         session: sessionId,
+         trigger
+-      })
+-    ).catch(
++      });
++    }).catch(
+       (e) => diag(this.harness, "retain_failed", {
+         ms: Date.now() - t0,
+         error: describeError(e),
+@@ -19098,6 +19103,7 @@
+         trigger
+       })
+     );
++    st.writeBack = write2;
+     this.inFlight.add(write2);
+     void write2.finally(() => this.inFlight.delete(write2));
+   }
+@@ -19283,9 +19289,11 @@
+   }
+   const hooks = createDshHooks(workspaceForAgent, liveAgents);
+   function toolDefinitions(root) {
+-    const template = workspaceFor(root);
+-    if (!template) return [];
+-    return specsOf(template).map((spec) => ({
++    const template = root === void 0 ? void 0 : workspaceFor(root);
++    if (root !== void 0 && !template) return [];
++    // Host-wide schemas must exist even when the launch directory has memory disabled.
++    const specs = template ? specsOf(template) : buildPageTools();
++    return specs.map((spec) => ({
+       name: spec.name,
+       description: spec.description,
+       parameters: toDshParameters(spec),
+@@ -19294,7 +19302,7 @@
+         render: (_args, value) => [{ type: "text", text: value }]
+       },
+       async execute(args, exec) {
+-        const workspace = exec.agent ? workspaceForAgent(exec.agent) : workspaceFor(root);
++        const workspace = exec.agent ? workspaceForAgent(exec.agent) : root === void 0 ? void 0 : workspaceFor(root);
+         if (!workspace) throw new Error("Hindsight memory is disabled for this workspace.");
+         const bound = specsOf(workspace).find((candidate) => candidate.name === spec.name);
+         if (!bound) throw new Error(`Hindsight tool ${spec.name} is unavailable.`);
+@@ -19317,8 +19325,8 @@
+   }
+   return { hooks, toolDefinitions, workspaceFor, workspaceForAgent, refresh, dispose };
+ }
+-function registerTools(toolCtx, root, runtime) {
+-  for (const definition of runtime.toolDefinitions(root)) {
++function registerTools(toolCtx, runtime) {
++  for (const definition of runtime.toolDefinitions()) {
+     toolCtx.tools.register(definition, {
+       when: ({ agent }) => runtime.workspaceForAgent(agent) !== void 0
+     });
+@@ -19331,7 +19339,7 @@
+   ctx.on("agent/turn-stopping", runtime.hooks.turnStopping);
+   ctx.on("agent/disposed", runtime.hooks.disposed);
+   ctx.inject(["tools"], (toolCtx) => {
+-    registerTools(toolCtx, process.cwd(), runtime);
++    registerTools(toolCtx, runtime);
+   });
+   ctx.effect(() => () => runtime.dispose());
+ }
+--- a/README.md
++++ b/README.md
+@@ -375,6 +375,8 @@
+ Run `npm run test:dsh` with the installed DSH CLI available on `PATH` to check the adapter,
+ conditional tool registration, configuration refresh, and cancellation contracts offline.
+ The tests use temporary configuration and simulated memory requests.
++Tool registration is independent of the directory where DSH starts: an opted-in session workspace
++can use the memory tools even when the process starts outside the configured workspace paths.
+ 
+ The adapter exports `createDshRuntime()` for the local `dsh-hindsight-manager` integration.
+ Each runtime owns its workspace cache and hooks. After saving memory configuration, the manager
+@@ -414,6 +416,9 @@
+ An empty recall or an earlier failed request does not stop future scheduled retrievals. Identical
+ results are injected again because older injected messages may have left the model's context during
+ compaction. Retrieved context is excluded from automatic transcript retention.
++Transcript progress advances after a successful submission. If a submission fails, a later turn-stop
++can retry the same transcript. A missing write endpoint (HTTP 404) is reported as a failure by both
++automatic retention and the document-ingestion tool.
+ 
+ Restart DSH to load code changes. Policy changes apply when the runtime is recreated (on restart,
+ or via the local manager's `runtime.refresh()`). The published settings-only manager requires a
+--- a/tests/dsh-adapter.test.mjs
++++ b/tests/dsh-adapter.test.mjs
+@@ -5,6 +5,7 @@
+ async function runtimeFixture() {
+   const state = { bank: 'before', apiUrl: 'http://before.local', disabled: false };
+   const cores = [];
++  const toolMetadata = { name: 'hindsight_recall', description: 'Recall', inputSchema: {} };
+   class RuntimeCore {
+     constructor(client, bankId, cfg) {
+       Object.assign(this, { client, bankId, cfg, seeded: 0, flushed: 0 });
+@@ -18,7 +19,7 @@
+     async flush() { this.flushed++; }
+     toolSpecs() {
+       return [{
+-        name: 'hindsight_recall', description: 'Recall', inputSchema: {},
++        ...toolMetadata,
+         handler: async (_args, signal) => {
+           this.toolSignal = signal;
+           return { content: [{ text: `${this.bankId}@${this.client.apiUrl}` }] };
+@@ -28,6 +29,7 @@
+   }
+   const adapter = await loadAdapter({
+     RuntimeCore,
++    buildPageTools: () => [toolMetadata],
+     resolveHostMemory: () => ({ cfg: { disabled: state.disabled }, bankId: state.bank, client: { apiUrl: state.apiUrl } }),
+   });
+   const context = () => {
+@@ -81,6 +83,7 @@
+   const { adapter, cores, context } = await runtimeFixture();
+   const ctx = context();
+   adapter.apply(ctx);
++  assert.equal(cores.length, 0, 'registering tool schemas does not create a launch-directory workspace');
+   assert.equal(typeof ctx.events.get('agent/created'), 'function');
+   ctx.events.get('agent/created')({ agent: agentFor() });
+   ctx.events.get('agent/created')({ agent: agentFor('/workspace', 'second-session') });
+--- /dev/null
++++ b/tests/dsh-retention-regression.test.mjs
+@@ -0,0 +1,275 @@
++import assert from 'node:assert/strict';
++import { randomUUID } from 'node:crypto';
++import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { join } from 'node:path';
++import { after, afterEach, beforeEach, test } from 'node:test';
++import { agentFor } from './load-adapter.mjs';
++
++const directory = mkdtempSync(join(tmpdir(), 'dsh-retention-test-'));
++const workspace = join(directory, 'project');
++const configPath = join(directory, 'coding-agent.json');
++const diagnosticsPath = join(directory, 'diagnostics.jsonl');
++const previousEnvironment = new Map();
++for (const [key, value] of Object.entries({
++  HINDSIGHT_CONFIG: configPath,
++  HINDSIGHT_LOG_FILE: join(directory, 'plugin.log'),
++  HINDSIGHT_DIAG_FILE: diagnosticsPath,
++  HINDSIGHT_USAGE_FILE: join(directory, 'usage.jsonl'),
++})) {
++  previousEnvironment.set(key, process.env[key]);
++  process.env[key] = value;
++}
++const { createDshRuntime } = await import('../dist/dsh.js');
++const originalFetch = globalThis.fetch;
++let runtime;
++let core;
++let agent;
++let requests;
++let unexpected;
++let retainResponse;
++let version;
++
++function deferred() {
++  let resolve;
++  const promise = new Promise((yes) => { resolve = yes; });
++  return { promise, resolve };
++}
++
++function addExchange(user, assistant) {
++  agent.session.events.push(
++    { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: user }] } },
++    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: assistant }] } } },
++  );
++}
++
++async function stop() {
++  await runtime.hooks.turnStopping({ agent });
++}
++
++function retained() {
++  return core.stateFor(agent.session.header.id).retainedTurns;
++}
++
++function cursor() {
++  return core.cursors.read(agent.session.header.id);
++}
++
++function diagnostics() {
++  return readFileSync(diagnosticsPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
++}
++
++beforeEach(() => {
++  writeFileSync(configPath, JSON.stringify({
++    serverMode: 'self-hosted', apiUrl: 'http://memory.invalid',
++    autoSeed: false, autoUpdate: false,
++    harnesses: { dsh: { bankId: 'project-memory', autoInject: 'none' } },
++  }));
++  writeFileSync(diagnosticsPath, '');
++  requests = [];
++  unexpected = [];
++  version = '0.10.2';
++  retainResponse = (body) => Response.json({ operation_id: body.operation_id });
++  globalThis.fetch = async (url, options) => {
++    const path = new URL(url).pathname;
++    if (path === '/v1/version') return Response.json({ api_version: version });
++    if (path.endsWith('/config')) return Response.json({ config: { store_document_text: true } });
++    if (path.includes('/operations/')) return Response.json({ status: 'completed' });
++    if (path.endsWith('/memories')) {
++      const body = JSON.parse(options.body);
++      requests.push(body);
++      return retainResponse(body);
++    }
++    unexpected.push(path);
++    throw new Error(`Unexpected request: ${path}`);
++  };
++  runtime = createDshRuntime();
++  const memory = runtime.workspaceFor(workspace);
++  memory.seeded = Promise.resolve();
++  core = memory.core;
++  agent = agentFor(workspace, randomUUID());
++  addExchange('Keep this decision.', 'I will remember the decision.');
++});
++
++afterEach(async () => {
++  await runtime.dispose();
++  rmSync(join(tmpdir(), 'hindsight-dsh', `${agent.session.header.id}.json`), { force: true });
++  assert.deepEqual(unexpected, []);
++});
++
++after(() => {
++  globalThis.fetch = originalFetch;
++  for (const [key, value] of previousEnvironment) {
++    if (value === undefined) delete process.env[key];
++    else process.env[key] = value;
++  }
++  rmSync(directory, { recursive: true, force: true });
++});
++
++for (const status of [503, 404]) {
++  test(`automatic write-back retries an unchanged transcript after HTTP ${status}`, async () => {
++    retainResponse = () => new Response('retain failed', { status });
++    await stop();
++    await core.flush();
++    assert.equal(retained(), 0, 'a rejected write must not acknowledge transcript progress');
++    assert.equal(cursor().dirty, true);
++    assert.equal(diagnostics().filter((entry) => entry.event === 'retain_ok').length, 0);
++    assert.equal(diagnostics().filter((entry) => entry.event === 'retain_failed').length, 1);
++
++    retainResponse = (body) => Response.json({ operation_id: body.operation_id });
++    await stop();
++    await core.flush();
++    assert.equal(requests.length, 2, 'the same transcript must be retried when the service recovers');
++    assert.equal(requests[1].items[0].content, requests[0].items[0].content);
++    assert.equal(retained(), 2);
++    assert.equal(cursor().dirty, undefined);
++    await stop();
++    await core.flush();
++    assert.equal(requests.length, 2, 'a successful retry must not submit the transcript again');
++  });
++}
++
++test('document ingestion rejects HTTP 404 instead of reporting success', async () => {
++  retainResponse = () => new Response('write endpoint missing', { status: 404 });
++  const tool = runtime.toolDefinitions(workspace).find((candidate) => candidate.name === 'hindsight_ingest_document');
++  await assert.rejects(
++    tool.execute({ title: 'Decision', content: 'Keep this decision.' }, { agent, signal: new AbortController().signal }),
++    /404.*write endpoint missing/,
++  );
++  assert.equal(requests.length, 1);
++  assert.equal(core.client.opIds.length, 0);
++});
++
++test('a live request snapshot does not suppress the completed reply at idle', async () => {
++  await core.onTranscript(agent.session.header.id, [
++    { role: 'user', content: 'Keep this decision.' },
++    { role: 'assistant', content: 'An incomplete response.' },
++  ], false);
++  await core.flush();
++  await stop();
++  await core.flush();
++  assert.equal(requests.length, 2);
++  assert.match(requests[1].items[0].content, /I will remember the decision/);
++  assert.doesNotMatch(requests[1].items[0].content, /An incomplete response/);
++  assert.equal(retained(), 2);
++});
++
++test('concurrent stops submit each successful transcript once on servers without append support', async () => {
++  version = '0.1.0';
++  const entered = deferred();
++  const firstResponse = deferred();
++  retainResponse = (body) => {
++    if (requests.length === 1) {
++      entered.resolve();
++      return firstResponse.promise;
++    }
++    return Response.json({ operation_id: body.operation_id });
++  };
++  try {
++    await stop();
++    await entered.promise;
++    assert.equal(retained(), 0, 'an in-flight request is not confirmed progress');
++    await stop();
++    addExchange('Also keep the next decision.', 'I will remember both decisions.');
++    await stop();
++  } finally {
++    firstResponse.resolve(Response.json({ operation_id: requests[0].operation_id }));
++  }
++  await core.flush();
++  assert.equal(requests.length, 2);
++  assert.equal(retained(), 4);
++  assert.equal(cursor().turns, 4);
++  assert.match(requests[1].items[0].content, /remember both decisions/);
++  await stop();
++  await core.flush();
++  assert.equal(requests.length, 2);
++});
++
++test('a shorter transcript arriving during a newer write cannot overwrite its progress', async () => {
++  version = '0.1.0';
++  const entered = deferred();
++  const firstResponse = deferred();
++  const oldTranscript = [{ role: 'user', content: 'old question' }, { role: 'assistant', content: 'old answer' }];
++  const newTranscript = [...oldTranscript, { role: 'user', content: 'new question' }, { role: 'assistant', content: 'new answer' }];
++  core.setTranscriptSource(async () => newTranscript);
++  retainResponse = (body) => {
++    if (requests.length === 1) {
++      entered.resolve();
++      return firstResponse.promise;
++    }
++    return Response.json({ operation_id: body.operation_id });
++  };
++  try {
++    await core.onSessionIdle(agent.session.header.id);
++    await entered.promise;
++    core.setTranscriptSource(async () => oldTranscript);
++    await core.onSessionIdle(agent.session.header.id);
++  } finally {
++    firstResponse.resolve(Response.json({ operation_id: requests[0].operation_id }));
++  }
++  await core.flush();
++  assert.equal(requests.length, 1, 'the old snapshot must not replace the newly saved transcript');
++  assert.equal(retained(), 4);
++  assert.equal(cursor().turns, 4);
++});
++
++test('a failed append can be retried without duplicating the previously saved exchange', async () => {
++  await stop();
++  await core.flush();
++  addExchange('Keep a second decision.', 'I will remember the second decision.');
++  retainResponse = () => new Response('retain failed', { status: 503 });
++  await stop();
++  await core.flush();
++  assert.equal(retained(), 2);
++  assert.equal(cursor().pending.length, 1);
++  retainResponse = (body) => Response.json({ operation_id: body.operation_id });
++  await stop();
++  await core.flush();
++  assert.equal(retained(), 4);
++  assert.equal(cursor().pending, undefined);
++  assert.equal(requests.length, 3);
++  assert.equal(requests[2].operation_id, requests[1].operation_id);
++  assert.equal(requests[2].items[0].content, requests[1].items[0].content);
++  assert.equal(requests[2].items[0].update_mode, 'append');
++  assert.doesNotMatch(requests[2].items[0].content, /Keep this decision/);
++});
++
++test('a partial append drain leaves transcript progress unconfirmed until pending writes finish', async (t) => {
++  await stop();
++  await core.flush();
++  addExchange('Keep a second decision.', 'I will remember the second decision.');
++  retainResponse = () => new Response('retain failed', { status: 503 });
++  await stop();
++  await core.flush();
++  assert.equal(retained(), 2);
++  assert.equal(cursor().pending.length, 1);
++
++  addExchange('Keep a third decision.', 'I will remember the third decision.');
++  let now = Date.now();
++  t.mock.method(Date, 'now', () => now);
++  retainResponse = (body) => {
++    now += 60_000;
++    return Response.json({ operation_id: body.operation_id });
++  };
++  await stop();
++  await core.flush();
++  assert.equal(requests.length, 3, 'the expired budget must leave the next append pending');
++  assert.equal(requests[2].operation_id, requests[1].operation_id);
++  assert.equal(cursor().pending.length, 1);
++  assert.match(cursor().pending[0].content, /Keep a third decision/);
++  assert.equal(retained(), 2, 'partial submission must not acknowledge the whole transcript');
++  assert.equal(diagnostics().filter((entry) => entry.event === 'retain_ok').length, 1);
++  assert.equal(diagnostics().filter((entry) => entry.event === 'retain_failed').length, 2);
++
++  retainResponse = (body) => Response.json({ operation_id: body.operation_id });
++  await stop();
++  await core.flush();
++  assert.equal(requests.length, 4, 'the unchanged transcript must retry its remaining append');
++  assert.match(requests[3].items[0].content, /Keep a third decision/);
++  assert.doesNotMatch(requests[3].items[0].content, /Keep a second decision/);
++  assert.equal(retained(), 6);
++  assert.equal(cursor().pending, undefined);
++  await stop();
++  await core.flush();
++  assert.equal(requests.length, 4, 'fully saved transcripts must not be submitted again');
++});
+--- /dev/null
++++ b/tests/dsh-tool-registration.test.mjs
+@@ -0,0 +1,141 @@
++import assert from 'node:assert/strict';
++import { after, afterEach, beforeEach, test } from 'node:test';
++import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
++import { delimiter, dirname, join } from 'node:path';
++import { tmpdir } from 'node:os';
++import { pathToFileURL } from 'node:url';
++import { agentFor } from './load-adapter.mjs';
++
++const directory = mkdtempSync(join(tmpdir(), 'dsh-tool-registration-test-'));
++const configPath = join(directory, 'coding-agent.json');
++const workspace = join(directory, 'project');
++const otherWorkspace = join(directory, 'other-project');
++const previousEnvironment = new Map();
++for (const [key, value] of Object.entries({
++  HINDSIGHT_CONFIG: configPath,
++  HINDSIGHT_LOG_FILE: join(directory, 'plugin.log'),
++  HINDSIGHT_DIAG_FILE: join(directory, 'diagnostics.jsonl'),
++})) {
++  previousEnvironment.set(key, process.env[key]);
++  process.env[key] = value;
++}
++const adapter = await import('../dist/dsh.js');
++const dshExecutable = process.env.PATH.split(delimiter).map((path) => join(path, 'dsh')).find(existsSync);
++assert.ok(dshExecutable, 'DSH must be installed to verify the actual host registry contract');
++const hostModules = join(dirname(dirname(realpathSync(dshExecutable))), 'node_modules');
++const { Context } = await import(pathToFileURL(join(hostModules, '@deepseek-ai/cordis/lib/index.js')));
++const { ToolsService } = await import(pathToFileURL(join(hostModules, '@deepseek-ai/dsh-tools/lib/index.js')));
++const originalFetch = globalThis.fetch;
++const runtimes = [];
++let requests;
++
++function configure(mapPathToBank = { [workspace]: 'project-bank', [otherWorkspace]: 'other-bank' }) {
++  writeFileSync(configPath, JSON.stringify({
++    serverMode: 'self-hosted', apiUrl: 'http://memory.invalid', autoSeed: false, autoUpdate: false,
++    harnesses: { dsh: { optInOnly: true, mapPathToBank, retainSessions: false } },
++  }));
++}
++
++function makeRuntime() {
++  const runtime = adapter.createDshRuntime();
++  runtimes.push(runtime);
++  return runtime;
++}
++
++async function admittedNames(tools, agent) {
++  const admitted = await tools.resolve({ agent, signal: new AbortController().signal });
++  try { return tools.schemas(agent, admitted).map(({ name }) => name); }
++  finally { admitted.dispose(); }
++}
++
++async function callTool(tools, agent, name) {
++  const signal = new AbortController().signal;
++  const admitted = await tools.resolve({ agent, signal });
++  try {
++    const tool = tools.executable(name, agent, admitted);
++    assert.ok(tool, `${name} should be available for ${agent.session.header.cwd}`);
++    return await tool.execute({}, { agent, signal });
++  } finally { admitted.dispose(); }
++}
++
++beforeEach(() => {
++  configure();
++  requests = [];
++  globalThis.fetch = async (url) => {
++    requests.push(String(url));
++    assert.ok(new URL(url).pathname.endsWith('/pages/tree'), `Unexpected request: ${url}`);
++    return Response.json({ roots: [] });
++  };
++});
++
++afterEach(async () => {
++  for (const runtime of runtimes.splice(0)) await runtime.dispose();
++});
++
++after(() => {
++  globalThis.fetch = originalFetch;
++  for (const [key, value] of previousEnvironment) {
++    if (value === undefined) delete process.env[key];
++    else process.env[key] = value;
++  }
++  rmSync(directory, { recursive: true, force: true });
++});
++
++test('native tools register from an unmapped launch directory and bind to each admitted session', async () => {
++  const runtime = makeRuntime();
++  assert.equal(runtime.workspaceFor(process.cwd()), undefined);
++  const expectedNames = runtime.toolDefinitions(workspace).map(({ name }) => name);
++  assert.ok(expectedNames.length > 0);
++  const ctx = new Context();
++  ctx.provide('systemPrompt', { tools() {} });
++  ctx.provide('agents', {});
++  const tools = new ToolsService(ctx);
++  let plugin = await ctx.plugin(adapter);
++  try {
++    assert.deepEqual(tools.schemas().map(({ name }) => name), expectedNames);
++    for (const root of [workspace, otherWorkspace]) {
++      const agent = agentFor(root);
++      assert.deepEqual(await admittedNames(tools, agent), expectedNames);
++      await callTool(tools, agent, 'hindsight_list_pages');
++    }
++    assert.deepEqual(requests.map((url) => new URL(url).pathname), [
++      '/v1/default/banks/project-bank/pages/tree', '/v1/default/banks/other-bank/pages/tree',
++    ]);
++    assert.deepEqual(await admittedNames(tools, agentFor(process.cwd())), []);
++    const subagent = agentFor(workspace);
++    subagent.session.header.origin = 'subagent';
++    assert.deepEqual(await admittedNames(tools, subagent), []);
++    await plugin.dispose();
++    assert.deepEqual(tools.schemas(), []);
++    plugin = await ctx.plugin(adapter);
++    assert.deepEqual(tools.schemas().map(({ name }) => name), expectedNames);
++  } finally { await plugin.dispose(); }
++});
++
++test('session-bound definitions follow refresh and cannot execute for disabled workspaces or subagents', async () => {
++  configure({});
++  const runtime = makeRuntime();
++  assert.deepEqual(runtime.toolDefinitions(workspace), [], 'explicit disabled root stays disabled');
++  const definitions = runtime.toolDefinitions();
++  const tool = definitions.find(({ name }) => name === 'hindsight_list_pages');
++  assert.ok(tool, 'native schema registration is independent of enabled workspaces');
++  const agent = agentFor(workspace);
++  const signal = new AbortController().signal;
++  await assert.rejects(tool.execute({}, { agent, signal }), /disabled/);
++  await assert.rejects(tool.execute({}, { signal }), /disabled/, 'unbound definitions require a session workspace');
++  configure({ [workspace]: 'enabled-bank' });
++  await runtime.refresh();
++  await tool.execute({}, { agent, signal });
++  assert.match(requests.at(-1), /\/banks\/enabled-bank\//);
++  configure({ [workspace]: 'changed-bank' });
++  await runtime.refresh();
++  await tool.execute({}, { agent, signal });
++  assert.match(requests.at(-1), /\/banks\/changed-bank\//);
++  const subagent = agentFor(workspace);
++  subagent.session.header.origin = 'subagent';
++  await assert.rejects(tool.execute({}, { agent: subagent, signal }), /disabled/);
++  configure({});
++  await runtime.refresh();
++  await assert.rejects(tool.execute({}, { agent, signal }), /disabled/);
++  assert.equal(requests.length, 2);
++});

@@ -35,13 +35,17 @@ function dshSettings(configPath) {
   return { ...managerConfig.formDefaults, ...raw, ...raw.harnesses?.dsh };
 }
 
+function serviceUrl(section) {
+  return section.serverMode === 'daemon' ? `http://127.0.0.1:${section.apiPort}` : section.apiUrl;
+}
+
 function readSettings(configPath) {
   const section = dshSettings(configPath);
   return {
     configPath,
     exists: existsSync(configPath),
     serverMode: section.serverMode,
-    apiUrl: section.serverMode === 'daemon' ? `http://127.0.0.1:${section.apiPort}` : section.apiUrl,
+    apiUrl: serviceUrl(section),
     apiTokenConfigured: Boolean(section.apiToken),
     optInOnly: section.optInOnly,
     optInPaths: section.optInPaths,
@@ -66,6 +70,7 @@ function writeConfigFile(configPath, next) {
  */
 function saveSettings(configPath, patch) {
   const raw = readConfigFile(configPath);
+  const current = { ...managerConfig.formDefaults, ...raw, ...raw.harnesses?.dsh };
   raw.harnesses ??= {};
   const section = raw.harnesses.dsh ??= {};
 
@@ -83,7 +88,13 @@ function saveSettings(configPath, patch) {
   if (Array.isArray(patch.optInPaths)) {
     section.optInPaths = patch.optInPaths.map(normalizeDir).filter(Boolean);
   }
-  for (const key of ['autoInject', 'apiUrl', 'apiToken']) {
+  if (typeof patch.apiUrl === 'string' && patch.apiUrl.trim() !== '') {
+    section.apiUrl = patch.apiUrl.trim();
+    if (current.serverMode === 'daemon' && section.apiUrl.replace(/\/+$/, '') !== serviceUrl(current)) {
+      section.serverMode = 'self-hosted';
+    }
+  }
+  for (const key of ['autoInject', 'apiToken']) {
     if (typeof patch[key] === 'string' && patch[key].trim() !== '') section[key] = patch[key].trim();
   }
   if (typeof patch.retainSessions === 'boolean') section.retainSessions = patch.retainSessions;
