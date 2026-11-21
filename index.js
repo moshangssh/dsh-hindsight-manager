@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from '
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import managerConfig from './manager.config.json' with { type: 'json' };
+import { registerActivity } from './activity.js';
 
 export const name = 'hindsight-manager';
 export const inject = ['webServer', 'connection'];
@@ -273,7 +274,8 @@ function saveSettings(configPath, patch, settings = managerConfig) {
   return readSettings(configPath, settings);
 }
 
-export function apply(ctx, config = {}) {
+export async function apply(ctx, config = {}) {
+  const activityReady = registerActivity(ctx);
   const settings = { ...managerConfig, ...config };
   const configPath = normalizeDir(settings.configPath);
   const readCurrentSettings = () => readSettings(configPath, settings);
@@ -414,6 +416,7 @@ export function apply(ctx, config = {}) {
       },
     );
   });
+  await activityReady;
 }
 
 export default { name, inject, apply };

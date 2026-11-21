@@ -311,7 +311,7 @@ test('actual manager state renders and a control edit saves through the backend 
     webServer: { register({ path, handler }) { routes.set(path, handler); } },
     connection: { requestRejection() {} },
     effect(callback) { callback(); },
-    inject(_services, callback) { callback(ctx); },
+    inject(services, callback) { if (services.every((name) => name in ctx)) callback(ctx); },
   };
   apply(ctx, { configPath, officialPackagePath: '' });
   const request = async (action, body) => {

@@ -108,6 +108,29 @@ window.__ModuleLoader__.load({
       banksPage: '本页已显示 / 服务器总数',
       invalidNumber: '请输入非负整数',
       invalidArray: '请输入 JSON 字符串数组',
+      activityRunning: '正在调用',
+      activityCalled: '已调用',
+      activityFailed: '调用异常',
+      activityUnused: '本轮未调用',
+      running: '进行中',
+      completed: '完成',
+      submitted: '已提交',
+      failed: '失败',
+      searchPages: '搜索记忆页面',
+      listPages: '浏览记忆页面',
+      readPage: '读取记忆页面',
+      reflectMemory: '综合记忆',
+      captureInitiative: '记录计划',
+      ingestDocument: '保存资料',
+      syncStatus: '检查同步状态',
+      diagnose: '诊断记忆服务',
+      autoRecall: '自动读取记忆',
+      autoPages: '自动读取记忆页面',
+      writeMemory: '写入记忆',
+      writeBack: '回写会话',
+      syncMemory: '同步项目记忆',
+      surveyMemory: '提交项目研究',
+      memoryService: '访问记忆服务',
     };
 
     const en = {
@@ -198,6 +221,29 @@ window.__ModuleLoader__.load({
       banksPage: 'Shown on this page / server total',
       invalidNumber: 'Enter a nonnegative integer',
       invalidArray: 'Enter a JSON array of strings',
+      activityRunning: 'Calling',
+      activityCalled: 'Called',
+      activityFailed: 'Call error',
+      activityUnused: 'Not called this turn',
+      running: 'In progress',
+      completed: 'Completed',
+      submitted: 'Submitted',
+      failed: 'Failed',
+      searchPages: 'Search memory pages',
+      listPages: 'List memory pages',
+      readPage: 'Read memory page',
+      reflectMemory: 'Reflect on memory',
+      captureInitiative: 'Record initiative',
+      ingestDocument: 'Save document',
+      syncStatus: 'Check sync status',
+      diagnose: 'Diagnose memory service',
+      autoRecall: 'Automatically recall memory',
+      autoPages: 'Automatically read memory pages',
+      writeMemory: 'Write memory',
+      writeBack: 'Write back conversation',
+      syncMemory: 'Sync project memory',
+      surveyMemory: 'Submit project survey',
+      memoryService: 'Access memory service',
     };
 
     // -- styles ---------------------------------------------------------------
@@ -233,8 +279,82 @@ window.__ModuleLoader__.load({
 .hm-origin { display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:12px; margin:6px 0; }
 .hm-summary { cursor:pointer; font-weight:600; font-size:14px; }
 .hm-input:disabled { opacity:.6; }
+.hm-activity { color:var(--dsw-alias-label-secondary); font-size:12px; line-height:1.6; padding:4px 0; }
+.hm-activity summary { cursor:pointer; width:fit-content; }
+.hm-activity[data-status="unused"] { color:var(--dsw-alias-label-tertiary); }
+.hm-activity[data-status="failed"] summary { color:var(--dsw-alias-state-error-primary); }
+.hm-activity ul { list-style:none; margin:6px 0 0; padding:0 0 0 20px; }
+.hm-activity li { display:flex; flex-wrap:wrap; gap:6px; }
 @media (max-width:720px){ .hm-item { grid-template-columns:1fr; } }
 `;
+
+    // Each activity record carries its originating turn, including writes that
+    // finish after turn/end. The same definition replays after a page reload.
+    const ACTIVITY_EVENT = 'plugin:dsh-hindsight-manager/activity';
+    const ACTIVITY_KIND = 'hindsight-activity';
+
+    function updateActivity(state, { event }) {
+      if (event.type === 'turn/start') return state;
+      if (event.type === 'turn/end') return { ...state, endSeq: event.seq };
+      const operation = event.data.operation;
+      const operations = [...state.operations];
+      if (operation !== null) {
+        const index = operations.findIndex((item) => item.id === operation.id);
+        if (index === -1) operations.push(operation);
+        else operations[index] = operation;
+      }
+      return { ...state, observed: true, operations, anchorSeq: event.seq };
+    }
+
+    const activityDefinition = {
+      kind: ACTIVITY_KIND,
+      target: 'chat',
+      match: {
+        [ACTIVITY_EVENT]: (event) => ({ id: String(event.data.ownerTurn), role: 'start' }),
+        'turn/start': (event) => ({ id: String(event.data.turn), role: 'start' }),
+        'turn/end': (event) => ({ id: String(event.data.turn), role: 'start' }),
+      },
+      start: (_context, match) => updateActivity({
+        observed: false,
+        turn: match.event.type === ACTIVITY_EVENT ? match.event.data.ownerTurn : match.event.data.turn,
+        operations: [],
+        anchorSeq: match.event.seq,
+        endSeq: null,
+      }, match),
+      update: (context, match) => updateActivity(context.state, match),
+      buildViewNode: (context) => {
+        const state = context.state;
+        if (!state.observed || (state.endSeq === null && state.operations.length === 0)) return null;
+        return {
+          key: context.key,
+          kind: ACTIVITY_KIND,
+          id: context.id,
+          target: 'chat',
+          anchorSeq: state.endSeq ?? state.anchorSeq,
+          location: (context.matches.find(({ event }) => event.type === 'turn/start' || event.type === 'turn/end') ?? context.matches[0]).location,
+          groupTree: 'turn',
+          visibility: 'visible',
+          data: state,
+        };
+      },
+    };
+
+    function Activity({ node, t }) {
+      const { operations } = node.data;
+      if (operations.length === 0) {
+        return h('div', { className: 'hm-activity', 'data-status': 'unused' }, `Hindsight · ${t('activityUnused')}`);
+      }
+      const status = operations.some((item) => item.status === 'running') ? 'running'
+        : operations.some((item) => item.status === 'failed') ? 'failed' : 'called';
+      const label = { running: 'activityRunning', failed: 'activityFailed', called: 'activityCalled' }[status];
+      return h('details', { className: 'hm-activity', 'data-status': status },
+        h('summary', null, h('span', { 'aria-hidden': true }, '🧠 '),
+          h('span', { role: 'status' }, `Hindsight · ${t(label)}`)),
+        h('ul', null, operations.map((item) => h('li', { key: item.id },
+          h('span', null, item.action.startsWith('hindsight_') ? item.action : t(item.action)),
+          h('span', null, `· ${t(item.status)}`)))),
+      );
+    }
 
     // -- page -----------------------------------------------------------------
 
@@ -299,13 +419,6 @@ window.__ModuleLoader__.load({
         void load();
       }, [load]);
 
-      useEffect(() => {
-        const style = document.createElement('style');
-        style.dataset.plugin = NS;
-        style.textContent = STYLE;
-        document.head.appendChild(style);
-        return () => style.remove();
-      }, []);
 
       const runProbe = async () => {
         setProbe(undefined);
@@ -789,6 +902,14 @@ window.__ModuleLoader__.load({
     const inject = ['slots', 'locale'];
 
     function apply(ctx) {
+      ctx.effect(() => {
+        const style = document.createElement('style');
+        style.dataset.plugin = NS;
+        style.textContent = STYLE;
+        document.head.appendChild(style);
+        return () => style.remove();
+      }, 'hindsight-manager: styles');
+
       try {
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'hindsight-manager: dictionaries');
       } catch {
@@ -801,6 +922,15 @@ window.__ModuleLoader__.load({
           return (key) => zh[key] ?? key;
         }
       })();
+
+      ctx.inject(['uiConversation'], (owner) => {
+        owner.effect(() => owner.uiConversation.events.register(activityDefinition), 'hindsight-manager: activity view');
+        owner.slots.inject('conversation.chat.node', () => owner.slots.register({
+          name: 'conversation.chat.node',
+          key: ACTIVITY_KIND,
+          inject: () => ({ t }),
+        }, Activity));
+      });
 
       ctx.slots.inject('settings.section', () =>
         ctx.slots.register(
