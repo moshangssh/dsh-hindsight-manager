@@ -1,6 +1,6 @@
 {
   "name": "dsh-hindsight-manager",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Settings panel for the official Hindsight plugin in DeepSeek Harness",
   "type": "module",
   "main": "index.js",
@@ -19,6 +19,7 @@
     "runtime-patches",
     "scripts/test-runtime.mjs",
     "tests/runtime",
+    "tests/host-modules.mjs",
     "tests/fixtures/api-contract-1.2.3.json",
     "README.md",
     "LICENSE"

@@ -5,12 +5,14 @@ import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 
 export const ACTIVITY_EVENT = 'plugin:dsh-hindsight-manager/activity';
+export const RECALL_EVENT = 'plugin:dsh-hindsight-manager/recall';
 const config = JSON.parse(readFileSync(new URL('./activity.config.json', import.meta.url), 'utf8'));
+const requestPathPattern = new RegExp(config.requestPathPattern);
 const requestRules = config.requests.map((rule) => ({ ...rule, pattern: new RegExp(rule.path) }));
 
 // Agent lifecycle dispatch establishes the async owner for the official
 // plugin's fire-and-forget work, including requests finishing in later turns.
-export function createActivityTracker(appendRecord) {
+export function createActivityTracker(appendRecord, getRuntime = () => undefined) {
   const context = new AsyncLocalStorage();
   let sessions = new WeakMap();
   const requests = new Map();
@@ -47,7 +49,9 @@ export function createActivityTracker(appendRecord) {
       for (const operation of state.startup.pending) publish(state.startup, operation);
       state.startup.pending.length = 0;
     }
-    return { session, turn, source };
+    // An in-flight pre-step continues to belong to its original runtime even
+    // if the provider is unloaded or replaced before a retry/fallback request.
+    return { session, turn, source, runtime: source === 'recall' ? getRuntime() : undefined };
   }
 
   function start(scope, action, success) {
@@ -71,9 +75,12 @@ export function createActivityTracker(appendRecord) {
     const scope = context.getStore();
     if (!scope || scope.source === 'tool') return;
     const path = new URL(request.path, request.origin).pathname;
-    // Only Hindsight bank API traffic in the observed lifecycle is activity.
+    // Match the bank API path, including deployments beneath a proxy prefix.
     // Package updates and model requests have different API paths.
-    if (!/^\/v1\/[^/]+\/banks(?:\/|$)/.test(path)) return;
+    if (!requestPathPattern.test(path)) return;
+    // Only the provider's body-retrieval scope is represented by a summary.
+    // Directory refreshes and writeback run outside it and retain HTTP activity.
+    if (scope.runtime?.queryScope()) return;
     const rule = requestRules.find((item) => (item.method === '*' || item.method === request.method) && item.pattern.test(path));
     const action = scope.source === 'writeback' && request.method === 'POST' && path.endsWith('/memories')
       ? 'writeBack'
@@ -118,7 +125,7 @@ export function createActivityTracker(appendRecord) {
   return {
     observeDispatch(_mode, event, args) {
       const payload = args[0];
-      if (event === 'agent/session-start') {
+      if (event === 'agent/created') {
         context.enterWith(sessionState(payload.agent.session).startup);
       }
       if (event === 'agent/pre-step' || event === 'agent/turn-stopping') {
@@ -154,12 +161,15 @@ export function createActivityTracker(appendRecord) {
 
 // Keep the settings panel usable without agent/tool services. DSH supplies
 // dsh-session through its runtime resolver; no copy of the memory runtime ships.
-export function registerActivity(ctx) {
+export function registerActivity(ctx, getRuntime = () => undefined) {
   return ctx.inject(['agents', 'tools'], async (owner) => {
     const { appendPluginRecord } = await import('@deepseek-ai/dsh-session');
-    const activity = createActivityTracker(appendPluginRecord);
+    const activity = createActivityTracker(appendPluginRecord, getRuntime);
     owner.effect(() => () => activity.dispose(), 'hindsight-manager: activity');
     owner.on('internal/dispatch', activity.observeDispatch);
+    owner.on('hindsight/observation', ({ agent, record }) => {
+      appendPluginRecord(agent.session, RECALL_EVENT, record);
+    });
     owner.on('tools/execute', (exec, next) => exec.name.startsWith('hindsight_')
       ? activity.tool(exec.agent.session, exec.name, next) : next());
   });

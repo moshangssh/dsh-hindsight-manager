@@ -9,6 +9,7 @@
     "hindsight_sync_status": { "action": "syncStatus", "success": "completed" },
     "hindsight_diagnose": { "action": "diagnose", "success": "completed" }
   },
+  "requestPathPattern": "(?:^|/)v1/[^/]+/banks(?:/|$)",
   "requests": [
     { "method": "POST", "path": "/memories/recall$", "action": "autoRecall", "success": "completed" },
     { "method": "POST", "path": "/reflect$", "action": "reflectMemory", "success": "completed" },

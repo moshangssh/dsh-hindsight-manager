@@ -1,0 +1,2871 @@
+--- a/README.md
++++ b/README.md
+@@ -372,6 +372,26 @@
+ too: the package ships the profile patch layer, so nothing else needs editing. Either route gets the
+ companion skill — a plugin wired by the host's own plugin manager installs it itself on the first
+ session, since that route never runs our installer.
++
++##### Local DSH enhancement
++
++This local build targets DSH 0.2.2-rc.1. Its package-root `dsh-memory.config.json` supplies DSH
++file defaults before the user's global, harness, path and bank settings. The default is direct
++recall on every user message with independent conversation write-back; no new environment inputs
++are added. `autoInjectEveryTurns` resets the cached decision on turns 1, 1+N, 1+2N; 0 retains the
++original initial-retrieval policy. Empty and failed results may still retry between scheduled turns.
++Tool continuations do not retrieve again. The existing first-turn page-preamble behavior is retained.
++
++The DSH adapter provides a read-only `hindsightRuntime` service and emits `hindsight/observation`
++records for the companion manager. Inspection reads the already initialized workspace; it does
++not create a client or resume a historical session. Summaries report the current retrieval result,
++HTTP failures, fallback stages and elapsed time without adding Hindsight requests. The manager
++confirms memory-body submission from the host's committed message, independently of retrieval.
++These records contain no query or memory text and do not enter model context.
++
++Restart DSH after changing the saved configuration. The current runtime caches each workspace,
++so a new session in an existing workspace may still use its old values. The package declaration
++`dsh-enhancement.json` describes the installation; the running service reports the executing build.
+ 
+ #### <img src="https://hindsight.vectorize.io/img/harness/workbuddy.png" alt="" width="20" height="20" /> WorkBuddy
+ 
+@@ -675,6 +695,7 @@
+ | `injectTimeoutMs`       | `7000`                               | retrieval timeout in milliseconds for `autoInject: "pages"` and `autoInject: "recall"`; also the **shared** budget for page search then recall after a reflect timeout/5xx (recall gets only the time left after page search). Set e.g. `2000` to limit turn latency or `15000` for a slower self-hosted bank. Environment fallback: `HINDSIGHT_INJECT_TIMEOUT_MS`. On hook harnesses, injection must fit the host's prompt-hook timeout (30s by default); for reflect with fallback, allow for **`reflectTimeoutMs` + `injectTimeoutMs`**, and raise the host hook's `timeout` when needed                                                                                                                                                                                                                                                                                                                     |
+ | `reflectBudget`         | `"high"`                             | reflect budget for the `hindsight_reflect` tool: `"low"`, `"mid"` or `"high"`. Drop it on a large bank where high-budget synthesis exceeds the server's wall timeout. The automatic session-start reflect always uses `"low"` to fit its hook window and is unaffected                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+ | `autoInject`            | `"reflect"`                          | what to inject once, on the session's **first prompt**: `"reflect"` = a low-budget reflect synthesis (on timeout/5xx it falls back to page search, then recall); `"pages"` = the pages matching the prompt by search; `"recall"` = the bank's memories recalled for the prompt (what it asks for is `recallOptions`, observations by default); `"none"` = nothing — the agent searches pages first and reflects only when they are too shallow. `"pages"` and `"recall"` are retrieval only (no LLM), their time budget is `injectTimeoutMs`, and when one finds nothing for the prompt it tries again on the next one, up to 5 prompts                                                                                                                                                                                                                                                                         |
++| `autoInjectEveryTurns`  | `1` in the local DSH policy          | File-only DSH cadence. Reset the retrieval decision every N user messages; 0 keeps the original initial-retrieval policy. Empty results and failures can still retry between scheduled turns.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+ | `autoReflect`           | `true`                               | **deprecated** — use `autoInject`. Still honoured (`false` = `autoInject: "none"`), ignored when `autoInject` is set, and logs a deprecation warning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+ | `pageSearchLimit`       | `3`                                  | pages ONE search returns. Applies to every search of the bank — the `autoInject: "pages"` injection, the reflect fallback, and the agent's own `hindsight_search_pages` tool — because the limit lives on the client they all share                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+ | `recallOptions`         | see description                      | overrides merged key-by-key into the body of every recall — the `autoInject: "recall"` source and the reflect fallback. Keys are the API's own recall parameters, passed straight through, so anything recall accepts is settable without a new option here; `query` is the one field it cannot replace. The default body is `{"types": ["observation"], "budget": "low", "max_tokens": 2000, "include": {"entities": null}}`, and what you set is merged over it one key at a time — `{"max_tokens": 4000}` changes the budget and leaves the rest alone. Observations are the consolidated layer, so they answer best per token, but a bank with **consolidation disabled never grows any** and the default recall comes back empty on it: set `{"types": ["world", "experience"]}` there, or `{"types": null}` for every type. File-only, like `retainMetadata` — an object does not flatten into an env var |
+--- a/dist/dsh.js
++++ b/dist/dsh.js
+@@ -5,10 +5,17 @@
+ };
+ 
+ // src/dsh.ts
++import { AsyncLocalStorage as AsyncLocalStorage2 } from "async_hooks";
+ import { randomUUID as randomUUID2 } from "crypto";
+ 
++// src/dsh-policy.ts
++import { readFileSync } from "fs";
++function readDshPolicy() {
++  return JSON.parse(readFileSync(new URL("../dsh-memory.config.json", import.meta.url), "utf8"));
++}
++
+ // src/core/config.ts
+-import { readFileSync as readFileSync3 } from "fs";
++import { readFileSync as readFileSync4 } from "fs";
+ import { homedir as homedir3 } from "os";
+ import { join as join7 } from "path";
+ 
+@@ -112,7 +119,7 @@
+ import { basename, dirname as dirname4, join as join6, normalize, sep } from "path";
+ 
+ // src/core/diag.ts
+-import { readFileSync } from "fs";
++import { readFileSync as readFileSync2 } from "fs";
+ import { join as join4 } from "path";
+ 
+ // src/core/log.ts
+@@ -188,7 +195,7 @@
+ }
+ 
+ // src/core/git-layout.ts
+-import { lstatSync, readFileSync as readFileSync2, realpathSync } from "fs";
++import { lstatSync, readFileSync as readFileSync3, realpathSync } from "fs";
+ import { dirname as dirname3, isAbsolute as isAbsolute2, join as join5, resolve as resolve2 } from "path";
+ var TRANSIENT = /* @__PURE__ */ new Set(["EAGAIN", "EMFILE", "ENFILE", "EBUSY", "EINTR", "EIO", "ETIMEDOUT"]);
+ var ATTEMPTS = 3;
+@@ -212,7 +219,7 @@
+ }
+ function readTextOrNull(path) {
+   try {
+-    return readFileSync2(path, "utf8");
++    return readFileSync3(path, "utf8");
+   } catch (error51) {
+     if (TRANSIENT.has(errorCode(error51))) throw new TransientProbeError(errorCode(error51));
+     return null;
+@@ -457,6 +464,10 @@
+     return null;
+   }
+ }
++
++// src/core/hindsight.ts
++import { AsyncLocalStorage } from "async_hooks";
++import { setTimeout as sleepWithSignal } from "timers/promises";
+ 
+ // src/core/missions.ts
+ import { createHash } from "crypto";
+@@ -724,6 +735,31 @@
+ var version = "0.8.8";
+ 
+ // src/core/hindsight.ts
++var callerCancellation = new AsyncLocalStorage();
++function throwIfCallerAborted() {
++  callerCancellation.getStore()?.throwIfAborted();
++}
++function withCallerSignal(signal, callback) {
++  return callerCancellation.run(signal, async () => {
++    signal?.throwIfAborted();
++    try {
++      const result = await callback();
++      signal?.throwIfAborted();
++      return result;
++    } catch (error51) {
++      signal?.throwIfAborted();
++      throw error51;
++    }
++  });
++}
++var HttpResponseError = class extends Error {
++  constructor(message, status) {
++    super(message);
++    this.status = status;
++    this.name = "HttpResponseError";
++  }
++  status;
++};
+ var USER_AGENT = `hindsight-coding-agents/${version}`;
+ function resolveRetainScopes(tags, configured) {
+   if (configured !== "per_source") return configured;
+@@ -760,6 +796,7 @@
+     const j = await r.json();
+     return String(j?.detail ?? "").trim().toLowerCase() === "not found";
+   } catch {
++    throwIfCallerAborted();
+     return false;
+   }
+ }
+@@ -880,6 +917,7 @@
+     try {
+       next = this.tokenProvider();
+     } catch {
++      throwIfCallerAborted();
+       return false;
+     }
+     if (next === this.token) return false;
+@@ -897,10 +935,23 @@
+    * free even for retain. The retry shares the caller's `signal`, deliberately: one deadline still
+    * bounds the whole call.
+    */
+-  async fetchWithAuth(url2, init) {
+-    const dispatcher = init.signal ? signalOnlyDispatcher() : void 0;
+-    const send = () => fetch(url2, { ...init, headers: this.headers(), ...dispatcher ? { dispatcher } : {} });
++  async fetchWithAuth(url2, init, onResponse) {
++    const callerSignal = callerCancellation.getStore();
++    const signal = callerSignal && init.signal ? AbortSignal.any([callerSignal, init.signal]) : callerSignal ?? init.signal;
++    const dispatcher = signal ? signalOnlyDispatcher() : void 0;
++    const send = async () => {
++      callerSignal?.throwIfAborted();
++      const response = await fetch(url2, {
++        ...init,
++        signal,
++        headers: this.headers(),
++        ...dispatcher ? { dispatcher } : {}
++      });
++      onResponse?.(response);
++      return response;
++    };
+     const r = await send();
++    callerSignal?.throwIfAborted();
+     if (r.status !== 401 || !this.refreshToken()) return r;
+     return send();
+   }
+@@ -914,29 +965,31 @@
+     return `${this.apiUrl}/v1/default/banks/${encodeURIComponent(this.bank)}${suffix}`;
+   }
+   /** `tolerate` adds statuses that are returned to the caller instead of thrown (404 always is). */
+-  async req(method, url2, body, tolerate = [], timeoutMs = 15e3) {
++  async req(method, url2, body, tolerate = [], timeoutMs = 15e3, onResponse) {
+     const payload = body ? JSON.stringify(body) : void 0;
+     let r;
+     for (let attempt = 0, waited = 0; ; attempt++) {
+-      r = await this.fetchWithAuth(url2, {
+-        method,
+-        body: payload,
+-        signal: AbortSignal.timeout(timeoutMs)
+-      });
++      r = await this.fetchWithAuth(
++        url2,
++        {
++          method,
++          body: payload,
++          signal: AbortSignal.timeout(timeoutMs)
++        },
++        onResponse
++      );
+       if (r.status !== 429 || tolerate.includes(429)) break;
+       const asked = retryAfterMs(r.headers.get("retry-after"));
+       const backoff = Math.min(RETRY_AFTER_CEILING_MS, RATE_LIMIT_BACKOFF_MS * 2 ** attempt);
+       const wait = Math.min(RETRY_AFTER_CEILING_MS, Math.max(asked, backoff)) * (1 + Math.random() / 2);
+       if (waited + wait > this.rateLimitPatienceMs) throw new RateLimitedError(asked);
+-      await sleep(wait);
++      await sleepWithSignal(wait, void 0, { signal: callerCancellation.getStore() });
+       waited += wait;
+     }
+-    if (!r.ok && r.status !== 404 && !tolerate.includes(r.status))
+-      throw new Error(
+-        // Query dropped: an encoded search query filled the 200-char error cap and pushed the
+-        // status and the server's reason out of the tool error (#6341).
+-        `${method} ${url2.split("?")[0]} -> ${r.status} ${await r.text()}${this.authHint(r.status)}`
+-      );
++    if (!r.ok && r.status !== 404 && !tolerate.includes(r.status)) {
++      const message = `${method} ${url2.split("?")[0]} -> ${r.status} ${await r.text()}${this.authHint(r.status)}`;
++      throw onResponse ? new HttpResponseError(message, r.status) : new Error(message);
++    }
+     return r;
+   }
+   /** Retain one memory. ALWAYS async: enqueue extraction server-side and collect its op-id for
+@@ -958,11 +1011,14 @@
+     if (opts.updateMode) item.update_mode = opts.updateMode;
+     const body = { items: [item], async: true };
+     if (opts.operationId) body.operation_id = opts.operationId;
+-    const r = await this.req("POST", this.bankUrl("/memories"), body);
++    const url2 = this.bankUrl("/memories");
++    const r = await this.req("POST", url2, body);
++    if (!r.ok) throw new Error(`POST ${url2} -> ${r.status} ${await r.text()}`);
+     try {
+       const j = await r.json();
+       if (j.operation_id) this.opIds.push(j.operation_id);
+     } catch {
++      throwIfCallerAborted();
+     }
+   }
+   /**
+@@ -993,6 +1049,7 @@
+         const j = await r.json();
+         return semverGte(j.api_version, MIN_IDEMPOTENT_RETAIN_VERSION);
+       } catch {
++        throwIfCallerAborted();
+       }
+     }
+     return false;
+@@ -1011,6 +1068,7 @@
+       const j = await r.json();
+       return j.config?.store_document_text !== false;
+     } catch {
++      throwIfCallerAborted();
+       return true;
+     }
+   }
+@@ -1032,6 +1090,7 @@
+         items = j.items || [];
+         total = j.total ?? 0;
+       } catch {
++        throwIfCallerAborted();
+         break;
+       }
+       for (const it of items) if (it.id) ids.add(it.id);
+@@ -1121,6 +1180,7 @@
+       const j = await r.json();
+       return j.overrides ?? {};
+     } catch {
++      throwIfCallerAborted();
+       return void 0;
+     }
+   }
+@@ -1138,6 +1198,7 @@
+       const ops = j.operations ?? j.items ?? [];
+       return ops.filter((o) => !TERMINAL.has((o?.status || "").toLowerCase())).length;
+     } catch {
++      throwIfCallerAborted();
+       return 0;
+     }
+   }
+@@ -1187,6 +1248,7 @@
+             if (st !== "completed") failed++;
+           }
+         } catch {
++          throwIfCallerAborted();
+         }
+       });
+       if (pending.size) {
+@@ -1209,11 +1271,15 @@
+     const ctrl = new AbortController();
+     const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs);
+     try {
+-      const resp = await this.fetchWithAuth(this.bankUrl("/reflect"), {
+-        method: "POST",
+-        body: JSON.stringify({ query, budget: opts.budget ?? "high" }),
+-        signal: ctrl.signal
+-      });
++      const resp = await this.fetchWithAuth(
++        this.bankUrl("/reflect"),
++        {
++          method: "POST",
++          body: JSON.stringify({ query, budget: opts.budget ?? "high" }),
++          signal: ctrl.signal
++        },
++        opts.onResponse
++      );
+       if (!resp.ok)
+         throw new ReflectError(
+           `reflect ${resp.status} ${(await resp.text()).slice(0, 1e3)}${this.authHint(resp.status)}`,
+@@ -1223,6 +1289,7 @@
+       const data = await resp.json();
+       return (data.text || "").trim();
+     } catch (e) {
++      throwIfCallerAborted();
+       if (ctrl.signal.aborted)
+         throw new ReflectError(`reflect timed out after ${opts.timeoutMs}ms`, void 0, true, {
+           cause: e
+@@ -1250,7 +1317,8 @@
+       // wrong question on every turn.
+       { ...this.recallOptions, query },
+       [],
+-      opts.timeoutMs
++      opts.timeoutMs,
++      opts.onResponse
+     );
+     if (r.status === 404) return [];
+     const j = await r.json();
+@@ -1271,8 +1339,8 @@
+    * Only 404 is tested: `req` throws on every other non-ok status it was not told to tolerate, so
+    * the 405/501 this used to check for never reach a caller in the first place.
+    */
+-  async pagesReq(method, sub, body, tolerate = [], timeoutMs) {
+-    const send = (legacy) => this.req(method, this.bankUrl(pagesPath(sub, legacy)), body, tolerate, timeoutMs);
++  async pagesReq(method, sub, body, tolerate = [], timeoutMs, onResponse) {
++    const send = (legacy) => this.req(method, this.bankUrl(pagesPath(sub, legacy)), body, tolerate, timeoutMs, onResponse);
+     let r = await send(this.legacyPagesPaths);
+     if (r.status !== 404 || !await isEndpointMissing(r)) return r;
+     if (!this.legacyPagesPaths) {
+@@ -1298,6 +1366,7 @@
+     try {
+       return (await r.json()).roots ?? [];
+     } catch {
++      throwIfCallerAborted();
+       return [];
+     }
+   }
+@@ -1348,7 +1417,14 @@
+   async searchPages(query, opts = {}) {
+     if (this.pagesSupported === false) throw new PagesUnavailableError();
+     const q = `?q=${encodeURIComponent(query)}&limit=${opts.limit ?? this.pageSearchLimit}`;
+-    const r = await this.pagesReq("GET", `/search${q}`, void 0, [], opts.timeoutMs);
++    const r = await this.pagesReq(
++      "GET",
++      `/search${q}`,
++      void 0,
++      [],
++      opts.timeoutMs,
++      opts.onResponse
++    );
+     if (!r) throw new PagesUnavailableError();
+     if (r.status === 404) return [];
+     const j = await r.json();
+@@ -1378,6 +1454,7 @@
+     try {
+       roots = await this.tree();
+     } catch (e) {
++      throwIfCallerAborted();
+       if (e instanceof PagesUnavailableError) {
+         this.log(`[bank] pages unavailable on ${this.apiUrl}; continuing without them`);
+         return;
+@@ -1512,6 +1589,7 @@
+         const j = await r?.json();
+         pageId = j?.page_id ?? j?.id;
+       } catch {
++        throwIfCallerAborted();
+       }
+       pageId ||= `initiative-${this.slugify(args.title)}`;
+     }
+@@ -1535,11 +1613,13 @@
+       );
+       if (hit?.id) return hit.id;
+     } catch {
++      throwIfCallerAborted();
+     }
+     try {
+       const r = await this.pagesReq("POST", "/folders", { name: name2 });
+       return (await r?.json())?.id;
+     } catch {
++      throwIfCallerAborted();
+       return void 0;
+     }
+   }
+@@ -1716,6 +1796,7 @@
+     injectTimeoutMs: raw.injectTimeoutMs || DEFAULT_INJECT_TIMEOUT_MS,
+     reflectBudget: resolveReflectBudget(raw),
+     autoInject: resolveAutoInject(raw),
++    autoInjectEveryTurns: raw.autoInjectEveryTurns,
+     pageSearchLimit: raw.pageSearchLimit || DEFAULT_PAGE_SEARCH_LIMIT,
+     // Same shape as retainMetadata: an object, or nothing. An array would spread into numeric
+     // keys and reach the API as garbage, so it is rejected like any other non-object.
+@@ -1755,7 +1836,7 @@
+ }
+ function readRaw(path) {
+   try {
+-    return JSON.parse(readFileSync3(path, "utf8"));
++    return JSON.parse(readFileSync4(path, "utf8"));
+   } catch (e) {
+     if (e?.code !== "ENOENT") {
+       console.error(`hindsight: ignoring invalid config at ${path}: ${e?.message || e}`);
+@@ -1877,7 +1958,8 @@
+ function loadConfig(opts = {}) {
+   const o = typeof opts === "string" ? { path: opts } : opts;
+   const withEnv = applyLayer({}, readEnvConfig(), o.harness);
+-  const raw = applyLayer(withEnv, readRaw(o.path ?? CONFIG_PATH), o.harness);
++  const defaults = o.harness === "dsh" ? mergeRaw(withEnv, readDshPolicy()) : withEnv;
++  const raw = applyLayer(defaults, readRaw(o.path ?? CONFIG_PATH), o.harness);
+   if (!raw.harness && o.harness) raw.harness = o.harness;
+   return resolveConfig(raw);
+ }
+@@ -1973,467 +2055,6 @@
+       }
+     })
+   };
+-}
+-
+-// src/core/auto-update.ts
+-import { spawn as realSpawn2 } from "child_process";
+-import {
+-  existsSync as existsSync2,
+-  mkdirSync as mkdirSync2,
+-  readFileSync as readFileSync4,
+-  realpathSync as realpathSync2,
+-  unlinkSync,
+-  writeFileSync
+-} from "fs";
+-import { homedir as homedir4, tmpdir } from "os";
+-import { dirname as dirname5, join as join8 } from "path";
+-import { fileURLToPath as fileURLToPath2 } from "url";
+-var PACKAGE_NAME = "@vectorize-io/hindsight-coding-agents";
+-var RELEASE_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/;
+-var CHECK_INTERVAL_MS = 24 * 60 * 60 * 1e3;
+-var NPM_VIEW_TIMEOUT_MS = 5e3;
+-var NPM_VIEW_HARD_DEADLINE_MS = NPM_VIEW_TIMEOUT_MS + 1e3;
+-function stateFile(runtimeDir) {
+-  return join8(runtimeDir, ".update-check.json");
+-}
+-function packageRoot() {
+-  return join8(dirname5(fileURLToPath2(import.meta.url)), "..");
+-}
+-function stagedRuntimeDir() {
+-  return join8(homedir4(), ".hindsight", "coding-agents");
+-}
+-function sameDir(a, b) {
+-  try {
+-    return realpathSync2(a) === realpathSync2(b);
+-  } catch {
+-    return a === b;
+-  }
+-}
+-function stagedVersion(pkgRoot) {
+-  try {
+-    const pkg = JSON.parse(readFileSync4(join8(pkgRoot, "package.json"), "utf8"));
+-    return typeof pkg.version === "string" ? pkg.version : "";
+-  } catch {
+-    return "";
+-  }
+-}
+-function isNewer(candidate, current2) {
+-  const parse4 = (v) => {
+-    const [core = "", ...rest] = v.trim().split("-");
+-    return {
+-      nums: core.split(".").map((n) => Number.parseInt(n, 10)),
+-      pre: rest.length > 0
+-    };
+-  };
+-  const a = parse4(candidate);
+-  const b = parse4(current2);
+-  if (a.nums.length !== 3 || b.nums.length !== 3) return false;
+-  if (a.nums.some(Number.isNaN) || b.nums.some(Number.isNaN)) return false;
+-  for (let i = 0; i < 3; i++) {
+-    if (a.nums[i] !== b.nums[i]) return a.nums[i] > b.nums[i];
+-  }
+-  return b.pre && !a.pre;
+-}
+-function dueForCheck(file2, now) {
+-  try {
+-    const state = JSON.parse(readFileSync4(file2, "utf8"));
+-    return typeof state.lastCheck !== "number" || now - state.lastCheck >= CHECK_INTERVAL_MS;
+-  } catch {
+-    return true;
+-  }
+-}
+-var ORIGIN_FILE = ".install-origin.json";
+-function selfUpdatable(runtimeDir) {
+-  try {
+-    const origin = JSON.parse(readFileSync4(join8(runtimeDir, ORIGIN_FILE), "utf8"));
+-    if (typeof origin.source !== "string" || !origin.source) return false;
+-    return origin.source.split(/[\\/]/).includes("_npx");
+-  } catch {
+-    return false;
+-  }
+-}
+-var LOCK_STALE_MS = 10 * 60 * 1e3;
+-function lockFile() {
+-  return join8(tmpdir(), "hindsight-coding-agent", "auto-update.lock");
+-}
+-function acquireUpdateLock(file2, now) {
+-  try {
+-    const held = JSON.parse(readFileSync4(file2, "utf8"));
+-    if (held.ts && now - held.ts < LOCK_STALE_MS) {
+-      let holderAlive = false;
+-      if (held.pid) {
+-        try {
+-          process.kill(held.pid, 0);
+-          holderAlive = true;
+-        } catch {
+-        }
+-      }
+-      if (holderAlive) return false;
+-    }
+-  } catch {
+-  }
+-  try {
+-    mkdirSync2(dirname5(file2), { recursive: true });
+-    writeFileSync(file2, JSON.stringify({ pid: process.pid, ts: now }));
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-function holdLockFor(file2, pid, now) {
+-  try {
+-    if (pid === void 0) return releaseUpdateLock(file2);
+-    writeFileSync(file2, JSON.stringify({ pid, ts: now }));
+-  } catch {
+-  }
+-}
+-function releaseUpdateLock(file2) {
+-  try {
+-    unlinkSync(file2);
+-  } catch {
+-  }
+-}
+-function stampCheck(file2, now, latest) {
+-  try {
+-    writeFileSync(file2, JSON.stringify({ lastCheck: now, latest }));
+-  } catch {
+-  }
+-}
+-function spawnNpm(spawnImpl, bin, args, opts) {
+-  return process.platform === "win32" ? spawnImpl([bin, ...args].join(" "), { ...opts, shell: true }) : spawnImpl(bin, args, opts);
+-}
+-async function npmViewVersion(pkg, spawnImpl = realSpawn2) {
+-  return new Promise((resolve4) => {
+-    let out = "";
+-    let settled = false;
+-    let deadline;
+-    const done = (v, reason) => {
+-      if (settled) return;
+-      settled = true;
+-      if (deadline) clearTimeout(deadline);
+-      if (reason) log.info("auto-update", `version check failed: ${reason}`);
+-      resolve4(v);
+-    };
+-    try {
+-      const child = spawnNpm(spawnImpl, "npm", ["view", pkg, "version", "--json"], {
+-        timeout: NPM_VIEW_TIMEOUT_MS,
+-        stdio: ["ignore", "pipe", "ignore"],
+-        windowsHide: true
+-      });
+-      child.stdout?.setEncoding("utf8");
+-      child.stdout?.on("data", (d) => {
+-        out += d;
+-      });
+-      child.stdout?.on("error", (e) => done("", describeError(e)));
+-      child.on("error", (e) => done("", describeError(e)));
+-      child.on("close", (code, signal) => {
+-        if (code !== 0) return done("", `npm view exited ${code ?? signal}`);
+-        try {
+-          const parsed = JSON.parse(out.trim());
+-          const v = Array.isArray(parsed) && parsed.length === 1 ? parsed[0] : parsed;
+-          if (typeof v !== "string")
+-            return done("", `unparsable npm output: ${out.trim().slice(0, 80)}`);
+-          if (!RELEASE_RE.test(v)) return done("", `not a release: ${v.slice(0, 40)}`);
+-          done(v);
+-        } catch {
+-          done("", `unparsable npm output: ${out.trim().slice(0, 80)}`);
+-        }
+-      });
+-      deadline = setTimeout(() => {
+-        try {
+-          child.kill("SIGKILL");
+-        } catch {
+-        }
+-        done("", "npm view never exited \u2014 hard deadline");
+-      }, NPM_VIEW_HARD_DEADLINE_MS);
+-    } catch (e) {
+-      done("", describeError(e));
+-    }
+-  });
+-}
+-async function maybeAutoUpdate(cfg, opts = {}) {
+-  try {
+-    if (!cfg.autoUpdate) return "";
+-    if (process.env.HINDSIGHT_DISABLE_HOOKS) return "";
+-    const pkgRoot = opts.pkgRoot ?? packageRoot();
+-    const runtime = opts.runtimeDir ?? stagedRuntimeDir();
+-    if (!existsSync2(runtime)) return "";
+-    if (!sameDir(pkgRoot, runtime)) return "";
+-    const now = opts.now ?? Date.now();
+-    const file2 = stateFile(runtime);
+-    if (!dueForCheck(file2, now)) return "";
+-    const current2 = stagedVersion(pkgRoot);
+-    if (!current2) return "";
+-    if (!(opts.selfUpdatable ?? selfUpdatable)(runtime)) {
+-      log.info("auto-update", "runtime is managed outside npx \u2014 leaving its version alone");
+-      stampCheck(file2, now, "");
+-      return "";
+-    }
+-    const binOk = opts.binOnPath ?? binOnPath;
+-    if (!binOk("npx") || !binOk("npm")) {
+-      log.info("auto-update", "npx/npm is not on PATH \u2014 skipping the update check");
+-      stampCheck(file2, now, "");
+-      return "";
+-    }
+-    const lock = opts.lockFile ?? lockFile();
+-    if (!acquireUpdateLock(lock, now)) return "";
+-    try {
+-      const latest = await (opts.npmView ?? npmViewVersion)(PACKAGE_NAME);
+-      stampCheck(file2, now, latest);
+-      if (!latest || !isNewer(latest, current2)) {
+-        releaseUpdateLock(lock);
+-        return "";
+-      }
+-      log.info("auto-update", `updating the Hindsight runtime ${current2} -> ${latest}`);
+-      const child = spawnNpm(
+-        opts.spawn ?? realSpawn2,
+-        "npx",
+-        ["-y", `${PACKAGE_NAME}@${latest}`, "update"],
+-        {
+-          detached: true,
+-          stdio: "ignore",
+-          windowsHide: true
+-        }
+-      );
+-      child.on("error", (e) => {
+-        log.warn("auto-update", `update spawn failed: ${e.message}`);
+-        releaseUpdateLock(lock);
+-      });
+-      child.unref();
+-      holdLockFor(lock, child.pid, now);
+-      return latest;
+-    } catch (e) {
+-      releaseUpdateLock(lock);
+-      throw e;
+-    }
+-  } catch {
+-    return "";
+-  }
+-}
+-
+-// src/core/daemon.ts
+-import { execFileSync, spawn as realSpawn3 } from "child_process";
+-import { dirname as dirname6, join as join9 } from "path";
+-import { fileURLToPath as fileURLToPath3 } from "url";
+-var DAEMON_WAIT_SESSION_START_MS = 12e3;
+-var DAEMON_WAIT_RETAIN_MS = 4e4;
+-async function isServerHealthy(baseUrl, timeoutMs = 2e3) {
+-  try {
+-    const res = await fetch(`${baseUrl}/health`, {
+-      headers: { "User-Agent": USER_AGENT },
+-      signal: AbortSignal.timeout(timeoutMs)
+-    });
+-    return res.ok;
+-  } catch {
+-    return false;
+-  }
+-}
+-function hasRustToolchain() {
+-  if (process.platform !== "darwin") return true;
+-  try {
+-    execFileSync("cargo", ["--version"], {
+-      stdio: "pipe",
+-      timeout: 1e4,
+-      windowsHide: true
+-    });
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-function hasUvx() {
+-  try {
+-    execFileSync("uvx", ["--version"], {
+-      stdio: "pipe",
+-      timeout: 1e4,
+-      windowsHide: true
+-    });
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-var PROVIDER_PROBES = [
+-  { provider: "openai", keyEnv: "OPENAI_API_KEY" },
+-  { provider: "anthropic", keyEnv: "ANTHROPIC_API_KEY" },
+-  { provider: "gemini", keyEnv: "GEMINI_API_KEY" },
+-  { provider: "groq", keyEnv: "GROQ_API_KEY" }
+-];
+-function detectLlm(env = process.env) {
+-  const explicit = env.HINDSIGHT_API_LLM_PROVIDER?.trim();
+-  if (explicit) {
+-    return {
+-      provider: explicit,
+-      apiKey: env.HINDSIGHT_API_LLM_API_KEY?.trim() || void 0,
+-      source: "HINDSIGHT_API_LLM_PROVIDER"
+-    };
+-  }
+-  for (const probe of PROVIDER_PROBES) {
+-    const key = env[probe.keyEnv]?.trim();
+-    if (key) return { provider: probe.provider, apiKey: key, source: probe.keyEnv };
+-  }
+-  if (onPath("claude")) {
+-    return { provider: "claude-code", source: "the Claude Code CLI on PATH (no API key needed)" };
+-  }
+-  return void 0;
+-}
+-function onPath(bin) {
+-  try {
+-    execFileSync("which", [bin], {
+-      stdio: "pipe",
+-      timeout: 5e3,
+-      windowsHide: true
+-    });
+-    return true;
+-  } catch {
+-    return false;
+-  }
+-}
+-var DAEMON_CONFIG_ENV = "HINDSIGHT_CODING_AGENTS_DAEMON_CONFIG";
+-function startDaemonDetached(cfg, harness, spawnFn = realSpawn3) {
+-  try {
+-    const starter = join9(dirname6(fileURLToPath3(import.meta.url)), "daemon-start.js");
+-    const child = spawnFn(nodeBinary(), [starter, "--harness", harness], {
+-      detached: true,
+-      stdio: "ignore",
+-      windowsHide: true,
+-      // The caller's config is already resolved for its directory and bank. Re-reading the file in
+-      // the starter lost `paths` / `banks` overrides, so a daemon enabled only there never started
+-      // (#6334).
+-      env: { ...process.env, [DAEMON_CONFIG_ENV]: JSON.stringify(cfg) }
+-    });
+-    child.on("error", () => {
+-    });
+-    child.unref();
+-    diag(harness, "daemon_start_spawned", { apiUrl: cfg.apiUrl });
+-  } catch {
+-  }
+-}
+-var coldStarts = /* @__PURE__ */ new Map();
+-async function waitBounded(p, ms) {
+-  let timer;
+-  try {
+-    await Promise.race([
+-      p,
+-      new Promise((resolve4) => {
+-        timer = setTimeout(resolve4, Math.max(ms, 0));
+-      })
+-    ]);
+-  } finally {
+-    clearTimeout(timer);
+-  }
+-}
+-async function ensureDaemon(cfg, harness, opts = {}) {
+-  if (cfg.serverMode !== "daemon") return;
+-  if (await isServerHealthy(cfg.apiUrl)) return;
+-  if (!preflightDaemon(cfg, harness)) return;
+-  const waitMs = opts.waitMs ?? 0;
+-  const running = coldStarts.get(cfg.apiUrl);
+-  if (running) {
+-    const startedAt = Date.now();
+-    await waitBounded(
+-      running.catch(() => void 0),
+-      waitMs
+-    );
+-    const remaining = waitMs - (Date.now() - startedAt);
+-    if (remaining > 0) await waitForHealth(cfg.apiUrl, remaining);
+-    return;
+-  }
+-  const attempt = (async () => {
+-    startDaemonDetached(cfg, harness, opts.spawnFn);
+-    await waitForHealth(cfg.apiUrl, waitMs);
+-  })();
+-  coldStarts.set(cfg.apiUrl, attempt);
+-  try {
+-    await attempt;
+-  } finally {
+-    if (coldStarts.get(cfg.apiUrl) === attempt) coldStarts.delete(cfg.apiUrl);
+-  }
+-}
+-async function waitForHealth(baseUrl, budgetMs, pollMs = 1e3) {
+-  const deadline = Date.now() + budgetMs;
+-  while (Date.now() < deadline) {
+-    await new Promise((r) => setTimeout(r, pollMs));
+-    if (await isServerHealthy(baseUrl)) return true;
+-  }
+-  return false;
+-}
+-function preflightDaemon(cfg, harness) {
+-  if (!hasUvx()) {
+-    diag(harness, "daemon_uvx_missing", { apiUrl: cfg.apiUrl });
+-    log.warn(harness, "daemon mode needs `uv` on PATH \u2014 see https://docs.astral.sh/uv/");
+-    return false;
+-  }
+-  if (!hasRustToolchain()) {
+-    diag(harness, "daemon_rust_missing", { platform: process.platform });
+-    log.warn(
+-      harness,
+-      "daemon mode on macOS needs a current Rust toolchain (litellm ships no macOS wheel) \u2014 install from https://rustup.rs, then `rustup default stable && rustup update`"
+-    );
+-    return false;
+-  }
+-  if (!detectLlm()) {
+-    diag(harness, "daemon_no_llm", {});
+-    log.warn(
+-      harness,
+-      "daemon mode needs an LLM for fact extraction \u2014 set OPENAI_API_KEY (or ANTHROPIC_API_KEY / GEMINI_API_KEY / HINDSIGHT_API_LLM_PROVIDER), or install the Claude Code CLI"
+-    );
+-    return false;
+-  }
+-  return true;
+-}
+-
+-// src/core/page-injection.ts
+-function parsePageList(raw) {
+-  const items = raw?.items;
+-  if (!Array.isArray(items)) return [];
+-  const out = [];
+-  for (const it of items) {
+-    const id = it?.id;
+-    const name2 = it?.name;
+-    if (typeof id === "string" && typeof name2 === "string") out.push({ id, title: name2 });
+-  }
+-  return out;
+-}
+-var EMPTY_STATE = "No pages yet \u2014 Hindsight is still learning this repo; they'll appear as it processes.";
+-function indexLine(pages) {
+-  const count = pages.length === 1 ? "1 page covers" : `${pages.length} pages cover`;
+-  return `${count} this repository \u2014 architecture, conventions, past decisions and in-flight initiatives. They are deliberately NOT listed here: call hindsight_search_pages(query) to find the ones that bear on the current turn, then hindsight_read_page(<id>) on anything the results show is worth reading in full.`;
+-}
+-var TOOL_GUIDE = `- hindsight_search_pages(query) \u2014 FIRST STOP, and the way IN to everything below. The code shows what is true today but not what was decided or why; memory shows what was decided or said back then but not whether it still holds. Work built from either alone goes wrong: from code alone it quietly re-litigates settled questions, from memory alone it acts on stale claims. Search BEFORE you act whenever the turn is one of these \u2014 they are the ones that go wrong silently:
+-    \u2022 the user reports a bug or a wrong response (the intended behaviour, and the status code or value it should return, may already have been decided);
+-    \u2022 you are about to write or change a test (what this project expects a change to ship with, and how it asserts, is a convention, not a preference);
+-    \u2022 you are implementing something new, or two parts have to fit together;
+-    \u2022 the user asks why something is the way it is, or what is left to do;
+-    \u2022 you are about to commit, and need to know what the change was supposed to honour.
+-  It ranks the pages by relevance and shows the opening of each; every page can come back, so the ranking, not the list, is the signal. Read the top page with hindsight_read_page before you rely on it \u2014 the opening is not the passage that matched. What it returns is a past record, not a live reading: a claim that something was fixed, passes, or works is what someone said then \u2014 check it against the code before you rely on it, and say so when the two disagree.
+-  CREDITING IS NOT OPTIONAL AND NOT A JUDGEMENT CALL. If you called this tool and anything it returned reached your reply \u2014 quoted, paraphrased, or merely confirming what you were about to say \u2014 open that part with a markdown blockquote, exactly: "> \u{1F9E0} **From Hindsight memory (<page>)** \u2014 <the specific facts you drew on>". Rewriting a snippet in your own words does not make it yours. A search that turned up nothing useful needs no mention at all \u2014 just carry on.
+-- hindsight_list_pages / hindsight_read_page \u2014 BEFORE substantial work, list the pages and read the relevant ones to ground yourself in this repo's architecture, conventions, and past decisions instead of re-deriving them from the code; follow any [[page:<id>]] links you see.
+-- hindsight_reflect(query) \u2014 when pages are too shallow and you need the WHY: deep reasoning over the repo's full memory for the past decision and exact values that explain a behavior or bug (slower \u2014 use deliberately, and credit results with a blockquote header "> \u{1F9E0} **From Hindsight memory** \u2014 <summary>").
+-- hindsight_capture_initiative(title, summary) \u2014 right after the user approves a plan or finishes brainstorming a new feature/capability and you are about to start implementing (BEFORE you write any code), call this to record it as a tracked page; then call it AGAIN with relates_to_page_id set to that page whenever the goal, scope, or rationale materially changes mid-work, so the page tracks the current plan and not the opening one. Skip bug fixes, small tweaks, chores, and trivial course-corrections.
+-- hindsight_ingest_document(title, content) \u2014 save an external document or durable notes/findings you want remembered (not the current conversation \u2014 that is captured automatically at session end).`;
+-var PAGES_FIRST_ON_GOALS = "- The user just set a NEW task or goal \u2192 search the pages FIRST with hindsight_search_pages. No synthesis is injected automatically in this configuration; call hindsight_reflect only when those pages are too shallow and deeper reasoning is needed.\n";
+-function toolGuide(opts) {
+-  const extra = opts?.extra?.trim();
+-  return (opts?.reflectOnNewGoals ? PAGES_FIRST_ON_GOALS : "") + TOOL_GUIDE + (extra ? `
+-${extra}` : "");
+-}
+-function buildPagesPreamble(pages, opts) {
+-  const body = pages.length ? indexLine(pages) : EMPTY_STATE;
+-  return `<hindsight_pages>
+-This repository has a Hindsight memory + pages (curated, continuously-updated pages plus the raw memory behind them). The tools below are registered, but you must actually CALL them at the right moments:
+-${toolGuide(opts)}
+-ALSO your correction tool: when you verify a Hindsight memory is wrong or stale, ingest a "Correction: <topic>" doc stating what memory claimed, what is true now, and the evidence \u2014 newer facts supersede older ones.
+-${body}
+-This tool guide and the page list are re-injected for you periodically as things change.
+-</hindsight_pages>`;
+-}
+-function buildRosterRefresh(pages, opts) {
+-  const rosterBlock = pages.length ? `${indexLine(pages)}
+-` : "";
+-  return "<hindsight_page_refresh>\n" + rosterBlock + `Reminder \u2014 this repo's Hindsight tools are available; call them at the right moments:
+-${toolGuide(opts)}
+-</hindsight_page_refresh>`;
+ }
+ 
+ // node_modules/zod/v4/classic/external.js
+@@ -16952,15 +16573,15 @@
+ 
+ // src/core/page-tools.ts
+ import { createHash as createHash4 } from "crypto";
+-import { existsSync as existsSync4 } from "fs";
+-import { homedir as homedir6 } from "os";
+-import { join as join12 } from "path";
++import { existsSync as existsSync3 } from "fs";
++import { homedir as homedir5 } from "os";
++import { join as join10 } from "path";
+ 
+ // src/core/status.ts
+-import { execFileSync as execFileSync4 } from "child_process";
++import { execFileSync as execFileSync3 } from "child_process";
+ 
+ // src/core/git.ts
+-import { execFileSync as execFileSync2 } from "child_process";
++import { execFileSync } from "child_process";
+ import { resolve as resolve3 } from "path";
+ 
+ // src/core/uuid.ts
+@@ -16991,7 +16612,7 @@
+ var GITLOG_HEAD = "gitlog-head:";
+ var GITLOG_FORMAT = `--format=%h${US}%ad${US}%an${US}%s${US}%b${RS}`;
+ function runGit(repo, args, env) {
+-  return execFileSync2("git", ["-C", repo, "-c", "log.showSignature=false", ...args], {
++  return execFileSync("git", ["-C", repo, "-c", "log.showSignature=false", ...args], {
+     encoding: "utf8",
+     maxBuffer: 1 << 28,
+     windowsHide: true,
+@@ -17043,13 +16664,66 @@
+   );
+ }
+ 
++// src/core/page-injection.ts
++function parsePageList(raw) {
++  const items = raw?.items;
++  if (!Array.isArray(items)) return [];
++  const out = [];
++  for (const it of items) {
++    const id = it?.id;
++    const name2 = it?.name;
++    if (typeof id === "string" && typeof name2 === "string") out.push({ id, title: name2 });
++  }
++  return out;
++}
++var EMPTY_STATE = "No pages yet \u2014 Hindsight is still learning this repo; they'll appear as it processes.";
++function indexLine(pages) {
++  const count = pages.length === 1 ? "1 page covers" : `${pages.length} pages cover`;
++  return `${count} this repository \u2014 architecture, conventions, past decisions and in-flight initiatives. They are deliberately NOT listed here: call hindsight_search_pages(query) to find the ones that bear on the current turn, then hindsight_read_page(<id>) on anything the results show is worth reading in full.`;
++}
++var TOOL_GUIDE = `- hindsight_search_pages(query) \u2014 FIRST STOP, and the way IN to everything below. The code shows what is true today but not what was decided or why; memory shows what was decided or said back then but not whether it still holds. Work built from either alone goes wrong: from code alone it quietly re-litigates settled questions, from memory alone it acts on stale claims. Search BEFORE you act whenever the turn is one of these \u2014 they are the ones that go wrong silently:
++    \u2022 the user reports a bug or a wrong response (the intended behaviour, and the status code or value it should return, may already have been decided);
++    \u2022 you are about to write or change a test (what this project expects a change to ship with, and how it asserts, is a convention, not a preference);
++    \u2022 you are implementing something new, or two parts have to fit together;
++    \u2022 the user asks why something is the way it is, or what is left to do;
++    \u2022 you are about to commit, and need to know what the change was supposed to honour.
++  It ranks the pages by relevance and shows the opening of each; every page can come back, so the ranking, not the list, is the signal. Read the top page with hindsight_read_page before you rely on it \u2014 the opening is not the passage that matched. What it returns is a past record, not a live reading: a claim that something was fixed, passes, or works is what someone said then \u2014 check it against the code before you rely on it, and say so when the two disagree.
++  CREDITING IS NOT OPTIONAL AND NOT A JUDGEMENT CALL. If you called this tool and anything it returned reached your reply \u2014 quoted, paraphrased, or merely confirming what you were about to say \u2014 open that part with a markdown blockquote, exactly: "> \u{1F9E0} **From Hindsight memory (<page>)** \u2014 <the specific facts you drew on>". Rewriting a snippet in your own words does not make it yours. A search that turned up nothing useful needs no mention at all \u2014 just carry on.
++- hindsight_list_pages / hindsight_read_page \u2014 BEFORE substantial work, list the pages and read the relevant ones to ground yourself in this repo's architecture, conventions, and past decisions instead of re-deriving them from the code; follow any [[page:<id>]] links you see.
++- hindsight_reflect(query) \u2014 when pages are too shallow and you need the WHY: deep reasoning over the repo's full memory for the past decision and exact values that explain a behavior or bug (slower \u2014 use deliberately, and credit results with a blockquote header "> \u{1F9E0} **From Hindsight memory** \u2014 <summary>").
++- hindsight_capture_initiative(title, summary) \u2014 right after the user approves a plan or finishes brainstorming a new feature/capability and you are about to start implementing (BEFORE you write any code), call this to record it as a tracked page; then call it AGAIN with relates_to_page_id set to that page whenever the goal, scope, or rationale materially changes mid-work, so the page tracks the current plan and not the opening one. Skip bug fixes, small tweaks, chores, and trivial course-corrections.
++- hindsight_ingest_document(title, content) \u2014 save an external document or durable notes/findings you want remembered (not the current conversation \u2014 that is captured automatically at session end).`;
++var PAGES_FIRST_ON_GOALS = "- The user just set a NEW task or goal \u2192 search the pages FIRST with hindsight_search_pages. No synthesis is injected automatically in this configuration; call hindsight_reflect only when those pages are too shallow and deeper reasoning is needed.\n";
++function toolGuide(opts) {
++  const extra = opts?.extra?.trim();
++  return (opts?.reflectOnNewGoals ? PAGES_FIRST_ON_GOALS : "") + TOOL_GUIDE + (extra ? `
++${extra}` : "");
++}
++function buildPagesPreamble(pages, opts) {
++  const body = pages.length ? indexLine(pages) : EMPTY_STATE;
++  return `<hindsight_pages>
++This repository has a Hindsight memory + pages (curated, continuously-updated pages plus the raw memory behind them). The tools below are registered, but you must actually CALL them at the right moments:
++${toolGuide(opts)}
++ALSO your correction tool: when you verify a Hindsight memory is wrong or stale, ingest a "Correction: <topic>" doc stating what memory claimed, what is true now, and the evidence \u2014 newer facts supersede older ones.
++${body}
++This tool guide and the page list are re-injected for you periodically as things change.
++</hindsight_pages>`;
++}
++function buildRosterRefresh(pages, opts) {
++  const rosterBlock = pages.length ? `${indexLine(pages)}
++` : "";
++  return "<hindsight_page_refresh>\n" + rosterBlock + `Reminder \u2014 this repo's Hindsight tools are available; call them at the right moments:
++${toolGuide(opts)}
++</hindsight_page_refresh>`;
++}
++
+ // src/core/survey.ts
+-import { execFileSync as execFileSync3, spawn as realSpawn5 } from "child_process";
++import { execFileSync as execFileSync2, spawn as realSpawn3 } from "child_process";
+ import { createHash as createHash3 } from "crypto";
+-import { existsSync as existsSync3, readFileSync as readFileSync5, writeFileSync as writeFileSync3 } from "fs";
+-import { homedir as homedir5, tmpdir as tmpdir2 } from "os";
+-import { dirname as dirname7, join as join11 } from "path";
+-import { fileURLToPath as fileURLToPath4 } from "url";
++import { existsSync as existsSync2, readFileSync as readFileSync5, writeFileSync as writeFileSync2 } from "fs";
++import { homedir as homedir4, tmpdir } from "os";
++import { dirname as dirname5, join as join9 } from "path";
++import { fileURLToPath as fileURLToPath2 } from "url";
+ 
+ // node_modules/smol-toml/dist/stringify.js
+ var BARE_KEY = /^[a-z0-9-_]+$/i;
+@@ -17238,21 +16912,21 @@
+ }
+ 
+ // src/core/survey-lease.ts
+-import { spawn as realSpawn4 } from "child_process";
++import { spawn as realSpawn2 } from "child_process";
+ import { randomUUID } from "crypto";
+ import {
+-  mkdirSync as mkdirSync3,
++  mkdirSync as mkdirSync2,
+   mkdtempSync,
+   readdirSync,
+   renameSync as renameSync2,
+   rmdirSync,
+   rmSync,
+   statSync as statSync3,
+-  unlinkSync as unlinkSync2,
++  unlinkSync,
+   utimesSync,
+-  writeFileSync as writeFileSync2
++  writeFileSync
+ } from "fs";
+-import { join as join10 } from "path";
++import { join as join8 } from "path";
+ var LEASE_STALE_MS = 3e4;
+ var SURVEY_SPEC_ENV = "HINDSIGHT_SURVEY_SPEC";
+ function tryRename(from, to) {
+@@ -17265,7 +16939,7 @@
+ }
+ function releaseLease(lease) {
+   try {
+-    unlinkSync2(join10(lease.directory, lease.owner));
++    unlinkSync(join8(lease.directory, lease.owner));
+   } catch {
+     return;
+   }
+@@ -17284,7 +16958,7 @@
+     return true;
+   }
+   if (owners.length !== 1) return false;
+-  const age = Date.now() - statSync3(join10(directory, owners[0])).mtimeMs;
++  const age = Date.now() - statSync3(join8(directory, owners[0])).mtimeMs;
+   if (Math.abs(age) <= staleMs) return false;
+   releaseLease({ directory, owner: owners[0] });
+   return true;
+@@ -17292,11 +16966,11 @@
+ function acquireLease(root, key, staleMs = LEASE_STALE_MS) {
+   let staging;
+   try {
+-    mkdirSync3(root, { recursive: true, mode: 448 });
+-    staging = mkdtempSync(join10(root, "claim-"));
++    mkdirSync2(root, { recursive: true, mode: 448 });
++    staging = mkdtempSync(join8(root, "claim-"));
+     const owner = randomUUID();
+-    writeFileSync2(join10(staging, owner), "", { flag: "wx", mode: 384 });
+-    const directory = join10(root, `survey-${key}.lock`);
++    writeFileSync(join8(staging, owner), "", { flag: "wx", mode: 384 });
++    const directory = join8(root, `survey-${key}.lock`);
+     if (!tryRename(staging, directory)) {
+       if (!reclaimIfStale(directory, staleMs)) return void 0;
+       if (!tryRename(staging, directory)) return void 0;
+@@ -17319,9 +16993,9 @@
+ function resolveClaudeBin(explicit) {
+   if (explicit) return explicit;
+   if (process.env.HINDSIGHT_CLAUDE_BIN) return process.env.HINDSIGHT_CLAUDE_BIN;
+-  const nativeInstallPath = join11(homedir5(), ".claude", "local", "claude");
++  const nativeInstallPath = join9(homedir4(), ".claude", "local", "claude");
+   try {
+-    if (existsSync3(nativeInstallPath)) return nativeInstallPath;
++    if (existsSync2(nativeInstallPath)) return nativeInstallPath;
+   } catch {
+   }
+   return "claude";
+@@ -17343,7 +17017,7 @@
+ }
+ function opencodeCanDefineSurveyAgent(bin) {
+   try {
+-    const out = execFileSync3(bin, ["--version"], {
++    const out = execFileSync2(bin, ["--version"], {
+       encoding: "utf8",
+       timeout: 5e3,
+       windowsHide: true,
+@@ -17463,9 +17137,9 @@
+ }
+ async function startCodebaseSurvey(repoDir, opts = {}) {
+   try {
+-    const spawnFn = opts.spawn ?? realSpawn5;
++    const spawnFn = opts.spawn ?? realSpawn3;
+     const resolveBin = opts.resolveBin ?? ((bin2) => binOnPath(bin2, { exts: [".exe"] }));
+-    const mcpServerPath = opts.mcpServerPath ?? join11(dirname7(fileURLToPath4(import.meta.url)), "mcp-server.js");
++    const mcpServerPath = opts.mcpServerPath ?? join9(dirname5(fileURLToPath2(import.meta.url)), "mcp-server.js");
+     const harness = opts.harness ?? "claude-code";
+     const name2 = resolveAgentBin(harness, opts.claudeBin);
+     if (!name2) {
+@@ -17489,10 +17163,10 @@
+     const { cfg, bankId } = resolveHostConfig(harness, repoDir);
+     if (cfg.disabled) return false;
+     const key = createHash3("sha256").update(JSON.stringify([cfg.apiUrl.replace(/\/+$/, ""), cfg.apiToken ?? "", bankId])).digest("hex");
+-    const leaseDir = opts.lease?.dir ?? join11(tmpdir2(), "hindsight-coding-agent", "surveys");
++    const leaseDir = opts.lease?.dir ?? join9(tmpdir(), "hindsight-coding-agent", "surveys");
+     const lease = acquireLease(leaseDir, key, opts.lease?.staleMs ?? LEASE_STALE_MS);
+     if (!lease) return false;
+-    const attemptsFile = join11(
++    const attemptsFile = join9(
+       leaseDir,
+       `attempts-${createHash3("sha256").update(JSON.stringify([key, repoDir])).digest("hex")}.json`
+     );
+@@ -17508,7 +17182,7 @@
+       args: plan.args,
+       ...opts.lease?.heartbeatMs ? { heartbeatMs: opts.lease.heartbeatMs } : {}
+     };
+-    const supervisorPath = opts.supervisorPath ?? join11(dirname7(fileURLToPath4(import.meta.url)), "survey-supervisor.js");
++    const supervisorPath = opts.supervisorPath ?? join9(dirname5(fileURLToPath2(import.meta.url)), "survey-supervisor.js");
+     return await new Promise((resolve4) => {
+       try {
+         const child = spawnFn(nodeBinary(), [supervisorPath], {
+@@ -17530,7 +17204,7 @@
+           child.unref();
+           if (opts.sha) {
+             try {
+-              writeFileSync3(
++              writeFileSync2(
+                 attemptsFile,
+                 JSON.stringify({ sha: opts.sha, attempts: attempts + 1 }),
+                 { mode: 384 }
+@@ -17555,7 +17229,7 @@
+ var DEEPEN_DIFF_TARGET = 300;
+ function commitCount(repoDir) {
+   try {
+-    const out = execFileSync4("git", ["-C", repoDir, "rev-list", "--count", "HEAD"], {
++    const out = execFileSync3("git", ["-C", repoDir, "rev-list", "--count", "HEAD"], {
+       encoding: "utf8",
+       windowsHide: true,
+       stdio: ["ignore", "pipe", "pipe"]
+@@ -17568,10 +17242,24 @@
+ }
+ async function syncStatus(client, bank, repoDir) {
+   const gitIds = await client.listDocumentIds("source:git", "all_strict");
+-  const chatIds = await client.listDocumentIds("source:chat", "all_strict").catch(() => /* @__PURE__ */ new Set());
+-  const pages = parsePageList(await client.listPages().catch(() => null));
+-  const activeOps = await client.activeOperations().catch(() => null);
+-  const uploads = await client.listDocumentIds("source:upload", "all_strict").catch(() => /* @__PURE__ */ new Set());
++  const chatIds = await client.listDocumentIds("source:chat", "all_strict").catch(() => {
++    throwIfCallerAborted();
++    return /* @__PURE__ */ new Set();
++  });
++  const pages = parsePageList(
++    await client.listPages().catch(() => {
++      throwIfCallerAborted();
++      return null;
++    })
++  );
++  const activeOps = await client.activeOperations().catch(() => {
++    throwIfCallerAborted();
++    return null;
++  });
++  const uploads = await client.listDocumentIds("source:upload", "all_strict").catch(() => {
++    throwIfCallerAborted();
++    return /* @__PURE__ */ new Set();
++  });
+   const surveyDocs = SURVEY_DOC_IDS.filter((id) => uploads.has(id)).length;
+   let surveyBaseline = null;
+   let surveyCommitsBehind = null;
+@@ -17589,6 +17277,7 @@
+         surveyCommitsBehind = best.behind;
+       }
+     } catch {
++      throwIfCallerAborted();
+     }
+   }
+   const repoName = repoDir ? repoNameOf(repoDir) : void 0;
+@@ -17631,6 +17320,7 @@
+   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+ }
+ function err(e) {
++  throwIfCallerAborted();
+   const message = describeError(e);
+   return { content: [{ type: "text", text: JSON.stringify({ error: message }) }], isError: true };
+ }
+@@ -17646,7 +17336,7 @@
+ function buildPageTools(client, bankId, opts = {}) {
+   const extra = opts.toolGuideExtra?.trim();
+   const crediting = extra ? `${CREDIT_REMINDER} ${extra}` : CREDIT_REMINDER;
+-  return [
++  const specs = [
+     {
+       name: "hindsight_sync_status",
+       description: "Report whether this repo's memory bank is in sync: gitlog seed present, how much recent history has been deepened with full diffs, conversations ingested, pages created, and extractions still running. `synced: true` means the seeded memory is fully queryable. Ingestion is automatic and background \u2014 if not synced, it is in progress; nothing to run.",
+@@ -17666,7 +17356,7 @@
+       inputSchema: {},
+       annotations: READ_ONLY_ANNOTATIONS,
+       handler: async (_args) => {
+-        const configPath = process.env.HINDSIGHT_CONFIG || join12(homedir6(), ".hindsight", "coding-agent.json");
++        const configPath = process.env.HINDSIGHT_CONFIG || join10(homedir5(), ".hindsight", "coding-agent.json");
+         const harness = opts.harness ?? "unknown";
+         const cfg = applyBankConfig(
+           loadConfig({ harness: opts.harness }),
+@@ -17679,7 +17369,7 @@
+           workspace: opts.repoDir ?? process.cwd(),
+           config: {
+             path: configPath,
+-            exists: existsSync4(configPath),
++            exists: existsSync3(configPath),
+             api_url: cfg.apiUrl,
+             api_token_configured: Boolean(cfg.apiToken),
+             disabled: cfg.disabled
+@@ -17803,6 +17493,418 @@
+       })
+     }
+   ];
++  return specs.map((spec) => {
++    const handler = spec.handler;
++    return { ...spec, handler: (args, signal) => withCallerSignal(signal, () => handler(args)) };
++  });
++}
++
++// src/core/auto-update.ts
++import { spawn as realSpawn4 } from "child_process";
++import {
++  existsSync as existsSync4,
++  mkdirSync as mkdirSync3,
++  readFileSync as readFileSync6,
++  realpathSync as realpathSync2,
++  unlinkSync as unlinkSync2,
++  writeFileSync as writeFileSync3
++} from "fs";
++import { homedir as homedir6, tmpdir as tmpdir2 } from "os";
++import { dirname as dirname6, join as join11 } from "path";
++import { fileURLToPath as fileURLToPath3 } from "url";
++var PACKAGE_NAME = "@vectorize-io/hindsight-coding-agents";
++var RELEASE_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/;
++var CHECK_INTERVAL_MS = 24 * 60 * 60 * 1e3;
++var NPM_VIEW_TIMEOUT_MS = 5e3;
++var NPM_VIEW_HARD_DEADLINE_MS = NPM_VIEW_TIMEOUT_MS + 1e3;
++function stateFile(runtimeDir) {
++  return join11(runtimeDir, ".update-check.json");
++}
++function packageRoot() {
++  return join11(dirname6(fileURLToPath3(import.meta.url)), "..");
++}
++function stagedRuntimeDir() {
++  return join11(homedir6(), ".hindsight", "coding-agents");
++}
++function sameDir(a, b) {
++  try {
++    return realpathSync2(a) === realpathSync2(b);
++  } catch {
++    return a === b;
++  }
++}
++function stagedVersion(pkgRoot) {
++  try {
++    const pkg = JSON.parse(readFileSync6(join11(pkgRoot, "package.json"), "utf8"));
++    return typeof pkg.version === "string" ? pkg.version : "";
++  } catch {
++    return "";
++  }
++}
++function isNewer(candidate, current2) {
++  const parse4 = (v) => {
++    const [core = "", ...rest] = v.trim().split("-");
++    return {
++      nums: core.split(".").map((n) => Number.parseInt(n, 10)),
++      pre: rest.length > 0
++    };
++  };
++  const a = parse4(candidate);
++  const b = parse4(current2);
++  if (a.nums.length !== 3 || b.nums.length !== 3) return false;
++  if (a.nums.some(Number.isNaN) || b.nums.some(Number.isNaN)) return false;
++  for (let i = 0; i < 3; i++) {
++    if (a.nums[i] !== b.nums[i]) return a.nums[i] > b.nums[i];
++  }
++  return b.pre && !a.pre;
++}
++function dueForCheck(file2, now) {
++  try {
++    const state = JSON.parse(readFileSync6(file2, "utf8"));
++    return typeof state.lastCheck !== "number" || now - state.lastCheck >= CHECK_INTERVAL_MS;
++  } catch {
++    return true;
++  }
++}
++var ORIGIN_FILE = ".install-origin.json";
++function selfUpdatable(runtimeDir) {
++  try {
++    const origin = JSON.parse(readFileSync6(join11(runtimeDir, ORIGIN_FILE), "utf8"));
++    if (typeof origin.source !== "string" || !origin.source) return false;
++    return origin.source.split(/[\\/]/).includes("_npx");
++  } catch {
++    return false;
++  }
++}
++var LOCK_STALE_MS = 10 * 60 * 1e3;
++function lockFile() {
++  return join11(tmpdir2(), "hindsight-coding-agent", "auto-update.lock");
++}
++function acquireUpdateLock(file2, now) {
++  try {
++    const held = JSON.parse(readFileSync6(file2, "utf8"));
++    if (held.ts && now - held.ts < LOCK_STALE_MS) {
++      let holderAlive = false;
++      if (held.pid) {
++        try {
++          process.kill(held.pid, 0);
++          holderAlive = true;
++        } catch {
++        }
++      }
++      if (holderAlive) return false;
++    }
++  } catch {
++  }
++  try {
++    mkdirSync3(dirname6(file2), { recursive: true });
++    writeFileSync3(file2, JSON.stringify({ pid: process.pid, ts: now }));
++    return true;
++  } catch {
++    return false;
++  }
++}
++function holdLockFor(file2, pid, now) {
++  try {
++    if (pid === void 0) return releaseUpdateLock(file2);
++    writeFileSync3(file2, JSON.stringify({ pid, ts: now }));
++  } catch {
++  }
++}
++function releaseUpdateLock(file2) {
++  try {
++    unlinkSync2(file2);
++  } catch {
++  }
++}
++function stampCheck(file2, now, latest) {
++  try {
++    writeFileSync3(file2, JSON.stringify({ lastCheck: now, latest }));
++  } catch {
++  }
++}
++function spawnNpm(spawnImpl, bin, args, opts) {
++  return process.platform === "win32" ? spawnImpl([bin, ...args].join(" "), { ...opts, shell: true }) : spawnImpl(bin, args, opts);
++}
++async function npmViewVersion(pkg, spawnImpl = realSpawn4) {
++  return new Promise((resolve4) => {
++    let out = "";
++    let settled = false;
++    let deadline;
++    const done = (v, reason) => {
++      if (settled) return;
++      settled = true;
++      if (deadline) clearTimeout(deadline);
++      if (reason) log.info("auto-update", `version check failed: ${reason}`);
++      resolve4(v);
++    };
++    try {
++      const child = spawnNpm(spawnImpl, "npm", ["view", pkg, "version", "--json"], {
++        timeout: NPM_VIEW_TIMEOUT_MS,
++        stdio: ["ignore", "pipe", "ignore"],
++        windowsHide: true
++      });
++      child.stdout?.setEncoding("utf8");
++      child.stdout?.on("data", (d) => {
++        out += d;
++      });
++      child.stdout?.on("error", (e) => done("", describeError(e)));
++      child.on("error", (e) => done("", describeError(e)));
++      child.on("close", (code, signal) => {
++        if (code !== 0) return done("", `npm view exited ${code ?? signal}`);
++        try {
++          const parsed = JSON.parse(out.trim());
++          const v = Array.isArray(parsed) && parsed.length === 1 ? parsed[0] : parsed;
++          if (typeof v !== "string")
++            return done("", `unparsable npm output: ${out.trim().slice(0, 80)}`);
++          if (!RELEASE_RE.test(v)) return done("", `not a release: ${v.slice(0, 40)}`);
++          done(v);
++        } catch {
++          done("", `unparsable npm output: ${out.trim().slice(0, 80)}`);
++        }
++      });
++      deadline = setTimeout(() => {
++        try {
++          child.kill("SIGKILL");
++        } catch {
++        }
++        done("", "npm view never exited \u2014 hard deadline");
++      }, NPM_VIEW_HARD_DEADLINE_MS);
++    } catch (e) {
++      done("", describeError(e));
++    }
++  });
++}
++async function maybeAutoUpdate(cfg, opts = {}) {
++  try {
++    if (!cfg.autoUpdate) return "";
++    if (process.env.HINDSIGHT_DISABLE_HOOKS) return "";
++    const pkgRoot = opts.pkgRoot ?? packageRoot();
++    const runtime = opts.runtimeDir ?? stagedRuntimeDir();
++    if (!existsSync4(runtime)) return "";
++    if (!sameDir(pkgRoot, runtime)) return "";
++    const now = opts.now ?? Date.now();
++    const file2 = stateFile(runtime);
++    if (!dueForCheck(file2, now)) return "";
++    const current2 = stagedVersion(pkgRoot);
++    if (!current2) return "";
++    if (!(opts.selfUpdatable ?? selfUpdatable)(runtime)) {
++      log.info("auto-update", "runtime is managed outside npx \u2014 leaving its version alone");
++      stampCheck(file2, now, "");
++      return "";
++    }
++    const binOk = opts.binOnPath ?? binOnPath;
++    if (!binOk("npx") || !binOk("npm")) {
++      log.info("auto-update", "npx/npm is not on PATH \u2014 skipping the update check");
++      stampCheck(file2, now, "");
++      return "";
++    }
++    const lock = opts.lockFile ?? lockFile();
++    if (!acquireUpdateLock(lock, now)) return "";
++    try {
++      const latest = await (opts.npmView ?? npmViewVersion)(PACKAGE_NAME);
++      stampCheck(file2, now, latest);
++      if (!latest || !isNewer(latest, current2)) {
++        releaseUpdateLock(lock);
++        return "";
++      }
++      log.info("auto-update", `updating the Hindsight runtime ${current2} -> ${latest}`);
++      const child = spawnNpm(
++        opts.spawn ?? realSpawn4,
++        "npx",
++        ["-y", `${PACKAGE_NAME}@${latest}`, "update"],
++        {
++          detached: true,
++          stdio: "ignore",
++          windowsHide: true
++        }
++      );
++      child.on("error", (e) => {
++        log.warn("auto-update", `update spawn failed: ${e.message}`);
++        releaseUpdateLock(lock);
++      });
++      child.unref();
++      holdLockFor(lock, child.pid, now);
++      return latest;
++    } catch (e) {
++      releaseUpdateLock(lock);
++      throw e;
++    }
++  } catch {
++    return "";
++  }
++}
++
++// src/core/daemon.ts
++import { execFileSync as execFileSync4, spawn as realSpawn5 } from "child_process";
++import { dirname as dirname7, join as join12 } from "path";
++import { fileURLToPath as fileURLToPath4 } from "url";
++var DAEMON_WAIT_SESSION_START_MS = 12e3;
++var DAEMON_WAIT_RETAIN_MS = 4e4;
++async function isServerHealthy(baseUrl, timeoutMs = 2e3) {
++  try {
++    const res = await fetch(`${baseUrl}/health`, {
++      headers: { "User-Agent": USER_AGENT },
++      signal: AbortSignal.timeout(timeoutMs)
++    });
++    return res.ok;
++  } catch {
++    return false;
++  }
++}
++function hasRustToolchain() {
++  if (process.platform !== "darwin") return true;
++  try {
++    execFileSync4("cargo", ["--version"], {
++      stdio: "pipe",
++      timeout: 1e4,
++      windowsHide: true
++    });
++    return true;
++  } catch {
++    return false;
++  }
++}
++function hasUvx() {
++  try {
++    execFileSync4("uvx", ["--version"], {
++      stdio: "pipe",
++      timeout: 1e4,
++      windowsHide: true
++    });
++    return true;
++  } catch {
++    return false;
++  }
++}
++var PROVIDER_PROBES = [
++  { provider: "openai", keyEnv: "OPENAI_API_KEY" },
++  { provider: "anthropic", keyEnv: "ANTHROPIC_API_KEY" },
++  { provider: "gemini", keyEnv: "GEMINI_API_KEY" },
++  { provider: "groq", keyEnv: "GROQ_API_KEY" }
++];
++function detectLlm(env = process.env) {
++  const explicit = env.HINDSIGHT_API_LLM_PROVIDER?.trim();
++  if (explicit) {
++    return {
++      provider: explicit,
++      apiKey: env.HINDSIGHT_API_LLM_API_KEY?.trim() || void 0,
++      source: "HINDSIGHT_API_LLM_PROVIDER"
++    };
++  }
++  for (const probe of PROVIDER_PROBES) {
++    const key = env[probe.keyEnv]?.trim();
++    if (key) return { provider: probe.provider, apiKey: key, source: probe.keyEnv };
++  }
++  if (onPath("claude")) {
++    return { provider: "claude-code", source: "the Claude Code CLI on PATH (no API key needed)" };
++  }
++  return void 0;
++}
++function onPath(bin) {
++  try {
++    execFileSync4("which", [bin], {
++      stdio: "pipe",
++      timeout: 5e3,
++      windowsHide: true
++    });
++    return true;
++  } catch {
++    return false;
++  }
++}
++var DAEMON_CONFIG_ENV = "HINDSIGHT_CODING_AGENTS_DAEMON_CONFIG";
++function startDaemonDetached(cfg, harness, spawnFn = realSpawn5) {
++  try {
++    const starter = join12(dirname7(fileURLToPath4(import.meta.url)), "daemon-start.js");
++    const child = spawnFn(nodeBinary(), [starter, "--harness", harness], {
++      detached: true,
++      stdio: "ignore",
++      windowsHide: true,
++      // The caller's config is already resolved for its directory and bank. Re-reading the file in
++      // the starter lost `paths` / `banks` overrides, so a daemon enabled only there never started
++      // (#6334).
++      env: { ...process.env, [DAEMON_CONFIG_ENV]: JSON.stringify(cfg) }
++    });
++    child.on("error", () => {
++    });
++    child.unref();
++    diag(harness, "daemon_start_spawned", { apiUrl: cfg.apiUrl });
++  } catch {
++  }
++}
++var coldStarts = /* @__PURE__ */ new Map();
++async function waitBounded(p, ms) {
++  let timer;
++  try {
++    await Promise.race([
++      p,
++      new Promise((resolve4) => {
++        timer = setTimeout(resolve4, Math.max(ms, 0));
++      })
++    ]);
++  } finally {
++    clearTimeout(timer);
++  }
++}
++async function ensureDaemon(cfg, harness, opts = {}) {
++  if (cfg.serverMode !== "daemon") return;
++  if (await isServerHealthy(cfg.apiUrl)) return;
++  if (!preflightDaemon(cfg, harness)) return;
++  const waitMs = opts.waitMs ?? 0;
++  const running = coldStarts.get(cfg.apiUrl);
++  if (running) {
++    const startedAt = Date.now();
++    await waitBounded(
++      running.catch(() => void 0),
++      waitMs
++    );
++    const remaining = waitMs - (Date.now() - startedAt);
++    if (remaining > 0) await waitForHealth(cfg.apiUrl, remaining);
++    return;
++  }
++  const attempt = (async () => {
++    startDaemonDetached(cfg, harness, opts.spawnFn);
++    await waitForHealth(cfg.apiUrl, waitMs);
++  })();
++  coldStarts.set(cfg.apiUrl, attempt);
++  try {
++    await attempt;
++  } finally {
++    if (coldStarts.get(cfg.apiUrl) === attempt) coldStarts.delete(cfg.apiUrl);
++  }
++}
++async function waitForHealth(baseUrl, budgetMs, pollMs = 1e3) {
++  const deadline = Date.now() + budgetMs;
++  while (Date.now() < deadline) {
++    await new Promise((r) => setTimeout(r, pollMs));
++    if (await isServerHealthy(baseUrl)) return true;
++  }
++  return false;
++}
++function preflightDaemon(cfg, harness) {
++  if (!hasUvx()) {
++    diag(harness, "daemon_uvx_missing", { apiUrl: cfg.apiUrl });
++    log.warn(harness, "daemon mode needs `uv` on PATH \u2014 see https://docs.astral.sh/uv/");
++    return false;
++  }
++  if (!hasRustToolchain()) {
++    diag(harness, "daemon_rust_missing", { platform: process.platform });
++    log.warn(
++      harness,
++      "daemon mode on macOS needs a current Rust toolchain (litellm ships no macOS wheel) \u2014 install from https://rustup.rs, then `rustup default stable && rustup update`"
++    );
++    return false;
++  }
++  if (!detectLlm()) {
++    diag(harness, "daemon_no_llm", {});
++    log.warn(
++      harness,
++      "daemon mode needs an LLM for fact extraction \u2014 set OPENAI_API_KEY (or ANTHROPIC_API_KEY / GEMINI_API_KEY / HINDSIGHT_API_LLM_PROVIDER), or install the Claude Code CLI"
++    );
++    return false;
++  }
++  return true;
+ }
+ 
+ // src/core/retain-cursor.ts
+@@ -18058,7 +18160,8 @@
+   }
+   cursors?.write(sessionId, { ...accepted(), pending: queue });
+   for (let i = 0; i < queue.length; i++) {
+-    if (i > 0 && Date.now() + REQUEST_BUDGET_MS > retryUntil) return;
++    if (i > 0 && Date.now() + REQUEST_BUDGET_MS > retryUntil)
++      throw new Error("Retain retry budget exhausted with pending appends");
+     const entry = queue[i];
+     await submitWithRetry(
+       () => submit(entry.content, entry.operationId, true),
+@@ -18072,7 +18175,7 @@
+ }
+ 
+ // src/core/usage.ts
+-import { readFileSync as readFileSync6 } from "fs";
++import { readFileSync as readFileSync7 } from "fs";
+ import { join as join13 } from "path";
+ function usageFilePath() {
+   return process.env.HINDSIGHT_USAGE_FILE || join13(logsDir(), "usage.jsonl");
+@@ -18180,7 +18283,7 @@
+ }
+ 
+ // src/core/skill-sync.ts
+-import { cpSync, existsSync as existsSync6, readFileSync as readFileSync7 } from "fs";
++import { cpSync, existsSync as existsSync6, readFileSync as readFileSync8 } from "fs";
+ import { homedir as homedir7 } from "os";
+ import { dirname as dirname8, join as join15 } from "path";
+ import { fileURLToPath as fileURLToPath5 } from "url";
+@@ -18255,7 +18358,7 @@
+     const dstMd = join15(dst, "SKILL.md");
+     const installed = existsSync6(dstMd);
+     if (!installed && !opts.install) return;
+-    if (!installed || readFileSync7(srcMd, "utf8") !== readFileSync7(dstMd, "utf8")) {
++    if (!installed || readFileSync8(srcMd, "utf8") !== readFileSync8(dstMd, "utf8")) {
+       cpSync(src, dst, { recursive: true });
+     }
+   } catch {
+@@ -18277,7 +18380,7 @@
+ }
+ 
+ // src/core/legacy.ts
+-import { existsSync as existsSync7, readFileSync as readFileSync8 } from "fs";
++import { existsSync as existsSync7, readFileSync as readFileSync9 } from "fs";
+ import { homedir as homedir8 } from "os";
+ import { join as join16, relative, isAbsolute as isAbsolute3 } from "path";
+ var LEGACY_CLAUDE_PLUGIN = "hindsight-memory";
+@@ -18307,7 +18410,7 @@
+ }
+ function readJson(path) {
+   try {
+-    const parsed = JSON.parse(readFileSync8(path, "utf8"));
++    const parsed = JSON.parse(readFileSync9(path, "utf8"));
+     return parsed && typeof parsed === "object" ? parsed : void 0;
+   } catch {
+     return void 0;
+@@ -18319,7 +18422,7 @@
+ }
+ 
+ // src/core/session-cache.ts
+-import { mkdirSync as mkdirSync4, readFileSync as readFileSync9, renameSync as renameSync3, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "fs";
++import { mkdirSync as mkdirSync4, readFileSync as readFileSync10, renameSync as renameSync3, rmSync as rmSync2, writeFileSync as writeFileSync4 } from "fs";
+ import { tmpdir as tmpdir3 } from "os";
+ import { dirname as dirname9, join as join17 } from "path";
+ function sessionCacheFile(harness, sessionId) {
+@@ -18327,7 +18430,7 @@
+ }
+ function readSessionCache(cacheFile) {
+   try {
+-    return JSON.parse(readFileSync9(cacheFile, "utf8"));
++    return JSON.parse(readFileSync10(cacheFile, "utf8"));
+   } catch {
+     return {};
+   }
+@@ -18643,7 +18746,7 @@
+ }
+ 
+ // src/core/turn-journal.ts
+-import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync5, readFileSync as readFileSync10, statSync as statSync4 } from "fs";
++import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync5, readFileSync as readFileSync11, statSync as statSync4 } from "fs";
+ import { tmpdir as tmpdir4 } from "os";
+ import { dirname as dirname10, join as join18 } from "path";
+ var JOURNAL_MAX_BYTES = 8 * 1024 * 1024;
+@@ -18668,114 +18771,159 @@
+   }
+   return prompt.slice(0, end);
+ }
+-async function injectPages(harness, prompt, client, timeoutMs, event, lead) {
++async function injectPages(harness, prompt, client, timeoutMs, event, lead, observation) {
+   const t0 = Date.now();
+   try {
+-    const hits = await client.searchPages(prompt.slice(0, 500), { timeoutMs });
++    const search = (onResponse) => client.searchPages(prompt.slice(0, 500), {
++      timeoutMs,
++      ...onResponse ? { onResponse } : {}
++    });
++    const hits = observation ? await observation.stage("pages", search, (value) => value.length) : await search();
+     diag(harness, event, { ms: Date.now() - t0, count: hits.length });
+     return hits.length ? formatPageFallback(hits, lead) : null;
+   } catch (e) {
++    throwIfCallerAborted();
+     diag(harness, `${event}_failed`, { ms: Date.now() - t0, error: describeError(e) });
+     return void 0;
+   }
+ }
+-async function injectRecall(harness, prompt, client, timeoutMs, event, lead) {
++async function injectRecall(harness, prompt, client, timeoutMs, event, lead, observation) {
+   const t0 = Date.now();
+   try {
+-    const observations = await client.recallObservations(boundRecallQuery(prompt), { timeoutMs });
++    const recall = (onResponse) => client.recallObservations(boundRecallQuery(prompt), {
++      timeoutMs,
++      ...onResponse ? { onResponse } : {}
++    });
++    const observations = observation ? await observation.stage("recall", recall, (value) => value.length) : await recall();
+     diag(harness, event, { ms: Date.now() - t0, count: observations.length });
+     return observations.length ? formatRecallFallback(observations, lead) : null;
+   } catch (e) {
++    throwIfCallerAborted();
+     diag(harness, `${event}_failed`, { ms: Date.now() - t0, error: describeError(e) });
+     return void 0;
+   }
+ }
+-async function reflectFallback(harness, prompt, client, timeoutMs) {
++async function reflectFallback(harness, prompt, client, timeoutMs, observation) {
+   const deadline = Date.now() + timeoutMs;
+   const remaining = () => Math.max(deadline - Date.now(), 1);
+-  return await injectPages(harness, prompt, client, remaining(), "reflect_fallback_pages") ?? // Event name predates the `injectRecall` rename and is kept: it is a logged contract that
++  return await injectPages(
++    harness,
++    prompt,
++    client,
++    remaining(),
++    "reflect_fallback_pages",
++    void 0,
++    observation
++  ) ?? // Event name predates the `injectRecall` rename and is kept: it is a logged contract that
+   // other tools read, so renaming it would silently break them.
+-  await injectRecall(harness, prompt, client, remaining(), "reflect_fallback_observations");
++  await injectRecall(
++    harness,
++    prompt,
++    client,
++    remaining(),
++    "reflect_fallback_observations",
++    void 0,
++    observation
++  );
+ }
+ async function buildHookOutput(args) {
+-  const { harness, prompt, cfg, client, cacheFile } = args;
++  const { harness, prompt, cfg, client, cacheFile, observation } = args;
+   const cached2 = readSessionCache(cacheFile);
+   const turns = (cached2.turns ?? 0) + 1;
+-  let reflectAnswer = cached2.reflectAnswer;
+-  let reflectAttempts = cached2.reflectAttempts ?? 0;
++  const refreshInjection = cfg.autoInjectEveryTurns !== void 0 && cfg.autoInjectEveryTurns > 0 && (turns - 1) % cfg.autoInjectEveryTurns === 0;
++  let reflectAnswer = refreshInjection ? void 0 : cached2.reflectAnswer;
++  let reflectAttempts = refreshInjection ? 0 : cached2.reflectAttempts ?? 0;
+   let reflectRanThisTurn = false;
+   let reflectFailed = false;
+   let fallback;
+-  const deferInitialReflect = cached2.deferInitialReflect === true;
+-  if (deferInitialReflect) {
+-    diag(harness, "reflect_deferred_new_bank", { query: prompt.slice(0, 80) });
+-  } else if (cfg.autoInject === "pages" && reflectAnswer === void 0) {
+-    reflectRanThisTurn = true;
+-    reflectAttempts++;
+-    const got = await injectPages(
+-      harness,
+-      prompt,
+-      client,
+-      cfg.injectTimeoutMs,
+-      "inject_pages",
+-      PAGE_INJECT_LEAD
+-    );
+-    if (got === void 0) reflectFailed = true;
+-    reflectAnswer = resolveInjection(got, reflectAttempts);
+-  } else if (cfg.autoInject === "recall" && reflectAnswer === void 0) {
+-    reflectRanThisTurn = true;
+-    reflectAttempts++;
+-    const got = await injectRecall(
+-      harness,
+-      prompt,
+-      client,
+-      cfg.injectTimeoutMs,
+-      "inject_recall",
+-      RECALL_INJECT_LEAD
+-    );
+-    if (got === void 0) reflectFailed = true;
+-    reflectAnswer = resolveInjection(got, reflectAttempts);
+-  } else if (cfg.autoInject === "reflect" && reflectAnswer === void 0) {
+-    reflectRanThisTurn = true;
+-    reflectAttempts++;
+-    const t0 = Date.now();
+-    const timeoutMs = cfg.reflectTimeoutMs;
+-    try {
+-      reflectAnswer = await client.reflect(buildReflectQuery(prompt), {
+-        // Automatic reflection runs inside the host's hook window. Hindsight's low budget is the
+-        // supported default for bounded reflect calls; callers that explicitly invoke the MCP
+-        // tool still get the deeper high-budget path.
+-        budget: "low",
+-        timeoutMs
+-      });
+-      diag(harness, reflectAnswer ? "reflect_ok" : "reflect_empty", {
+-        ms: Date.now() - t0,
+-        chars: reflectAnswer.length,
+-        query: prompt.slice(0, 80),
+-        // Verbatim injected synthesis — the ONLY durable record of what the agent actually saw
+-        // (post-mortems otherwise depend on the harness happening to persist hook context).
+-        answer: reflectAnswer.slice(0, 8e3)
+-      });
+-    } catch (e) {
+-      reflectAnswer = e instanceof ReflectError && e.permanent ? "" : resolveInjection(void 0, reflectAttempts);
+-      reflectFailed = true;
+-      log.warn(harness, "reflect failed \u2014 session runs without memory", {
+-        error: describeError(e)
+-      });
+-      diag(harness, "reflect_failed", {
+-        ms: Date.now() - t0,
+-        bank: client.bank,
+-        timeoutMs,
+-        // Wider than describeError's default: the server's error body is the useful part.
+-        error: describeError(e, 1500),
+-        query: prompt.slice(0, 80)
+-      });
+-      if (e instanceof ReflectError && e.fallbackEligible) {
+-        fallback = await reflectFallback(harness, prompt, client, cfg.injectTimeoutMs);
+-        if (fallback) reflectAnswer = fallback;
+-      }
+-    }
+-  }
++  const deferInitialReflect = !refreshInjection && cached2.deferInitialReflect === true;
++  const retrieve = async () => {
++    if (deferInitialReflect) {
++      observation?.skip("deferred_new_bank");
++      diag(harness, "reflect_deferred_new_bank", { query: prompt.slice(0, 80) });
++    } else if (cfg.autoInject === "pages" && reflectAnswer === void 0) {
++      reflectRanThisTurn = true;
++      reflectAttempts++;
++      const got = await injectPages(
++        harness,
++        prompt,
++        client,
++        cfg.injectTimeoutMs,
++        "inject_pages",
++        PAGE_INJECT_LEAD,
++        observation
++      );
++      if (got === void 0) reflectFailed = true;
++      reflectAnswer = resolveInjection(got, reflectAttempts);
++    } else if (cfg.autoInject === "recall" && reflectAnswer === void 0) {
++      reflectRanThisTurn = true;
++      reflectAttempts++;
++      const got = await injectRecall(
++        harness,
++        prompt,
++        client,
++        cfg.injectTimeoutMs,
++        "inject_recall",
++        RECALL_INJECT_LEAD,
++        observation
++      );
++      if (got === void 0) reflectFailed = true;
++      reflectAnswer = resolveInjection(got, reflectAttempts);
++    } else if (cfg.autoInject === "reflect" && reflectAnswer === void 0) {
++      reflectRanThisTurn = true;
++      reflectAttempts++;
++      const t0 = Date.now();
++      const timeoutMs = cfg.reflectTimeoutMs;
++      try {
++        const reflect = (onResponse) => client.reflect(buildReflectQuery(prompt), {
++          // Automatic reflection runs inside the host's hook window. Hindsight's low budget is the
++          // supported default for bounded reflect calls; callers that explicitly invoke the MCP
++          // tool still get the deeper high-budget path.
++          budget: "low",
++          timeoutMs,
++          ...onResponse ? { onResponse } : {}
++        });
++        reflectAnswer = observation ? await observation.stage("reflect", reflect, (value) => value.length) : await reflect();
++        diag(harness, reflectAnswer ? "reflect_ok" : "reflect_empty", {
++          ms: Date.now() - t0,
++          chars: reflectAnswer.length,
++          query: prompt.slice(0, 80),
++          // Verbatim injected synthesis — the ONLY durable record of what the agent actually saw
++          // (post-mortems otherwise depend on the harness happening to persist hook context).
++          answer: reflectAnswer.slice(0, 8e3)
++        });
++      } catch (e) {
++        throwIfCallerAborted();
++        reflectAnswer = e instanceof ReflectError && e.permanent ? "" : resolveInjection(void 0, reflectAttempts);
++        reflectFailed = true;
++        log.warn(harness, "reflect failed \u2014 session runs without memory", {
++          error: describeError(e)
++        });
++        diag(harness, "reflect_failed", {
++          ms: Date.now() - t0,
++          bank: client.bank,
++          timeoutMs,
++          // Wider than describeError's default: the server's error body is the useful part.
++          error: describeError(e, 1500),
++          query: prompt.slice(0, 80)
++        });
++        if (e instanceof ReflectError && e.fallbackEligible) {
++          fallback = await reflectFallback(
++            harness,
++            prompt,
++            client,
++            cfg.injectTimeoutMs,
++            observation
++          );
++          if (fallback) reflectAnswer = fallback;
++        }
++      }
++    } else {
++      observation?.skip(cfg.autoInject === "none" ? "mode_none" : "cached_decision");
++    }
++  };
++  if (observation) await observation.body(retrieve);
++  else await retrieve();
+   const cadence = cfg.pageRefreshEveryTurns;
+   const stale = !cached2.pages || cadence > 0 && turns - cached2.pages.atTurn >= cadence;
+   let pages = cached2.pages?.list ?? [];
+@@ -18785,6 +18933,7 @@
+       pages = parsePageList(await client.listPages());
+       diag(harness, "pages_ok", { ms: Date.now() - t0, count: pages.length });
+     } catch (e) {
++      throwIfCallerAborted();
+       diag(harness, client.pagesSupported === false ? "pages_unavailable" : "pages_failed", {
+         ms: Date.now() - t0,
+         error: describeError(e)
+@@ -18820,7 +18969,12 @@
+   } else if (reflectFailed) {
+     notice = `${brandWord()} \xB7 no memory this turn \u2014 see ${diagFilePath()}`;
+   }
+-  return { context: kept.length ? kept.join("\n\n") : void 0, notice, pages };
++  return {
++    context: kept.length ? kept.join("\n\n") : void 0,
++    notice,
++    pages,
++    bodyPresent: Boolean(reflectAnswer && reflectRanThisTurn)
++  };
+ }
+ 
+ // src/core/runtime.ts
+@@ -18882,6 +19036,23 @@
+         bankId: this.bankId
+       })
+     });
++  }
++  /** Reads the cached instance only. Inspecting must never re-resolve configuration or create clients. */
++  inspectEffective() {
++    return {
++      workspaceRoot: this.projectDir,
++      bankId: this.bankId,
++      apiUrl: this.client.apiUrl,
++      autoInject: this.cfg.autoInject,
++      autoInjectEveryTurns: this.cfg.autoInjectEveryTurns ?? null,
++      retainSessions: this.cfg.retainSessions,
++      injectTimeoutMs: this.cfg.injectTimeoutMs,
++      recallOptions: {
++        types: this.client.recallOptions.types ?? null,
++        budget: this.client.recallOptions.budget ?? null,
++        max_tokens: this.client.recallOptions.max_tokens ?? null
++      }
++    };
+   }
+   get writeBackEnabled() {
+     return this.cfg.retainSessions;
+@@ -18922,29 +19093,38 @@
+    * intentionally replaces the old in-memory reflect/page state, keeping lifecycle behavior
+    * identical across hosts while this adapter retains only delivery-specific state.
+    */
+-  async onPrompt(sessionId, rawPrompt) {
+-    if (process.env.HINDSIGHT_DISABLE_HOOKS) return;
++  async onPrompt(sessionId, rawPrompt, signal, observation) {
++    signal?.throwIfAborted();
++    if (process.env.HINDSIGHT_DISABLE_HOOKS) {
++      observation?.skip("hooks_disabled");
++      return;
++    }
+     if (!sessionId) return;
+     const prompt = stripInjectedMemory(rawPrompt).trim();
+     if (!prompt) {
++      observation?.skip("no_user_text");
++      if (observation) observation.record.bodyPresent = false;
+       this.injection.delete(sessionId);
+       return;
+     }
+     const turns = (this.turnCount.get(sessionId) ?? 0) + 1;
+-    this.turnCount.set(sessionId, turns);
+     const cacheFile = sessionCacheFile(this.harness, sessionId);
+     if (this.deferInitialReflect) {
+       this.deferInitialReflect = false;
+       writeSessionCache(cacheFile, { deferInitialReflect: true });
+     }
+-    const output = await buildHookOutput({
+-      harness: this.harness,
+-      prompt,
+-      cfg: this.cfg,
+-      client: this.client,
+-      cacheFile,
+-      preambleOnFirstTurn: true
+-    });
++    const output = await withCallerSignal(
++      signal,
++      () => buildHookOutput({
++        harness: this.harness,
++        prompt,
++        cfg: this.cfg,
++        client: this.client,
++        cacheFile,
++        preambleOnFirstTurn: true,
++        observation
++      })
++    );
+     const blocks = [];
+     if (turns === 1) {
+       blocks.push(
+@@ -18961,7 +19141,9 @@
+       this.notify?.("Hindsight \xB7 recalled past decisions", preview);
+     }
+     const block = blocks.filter(Boolean).join("\n\n");
++    this.turnCount.set(sessionId, turns);
+     this.injection.set(sessionId, block);
++    if (observation) observation.record.bodyPresent = output.bodyPresent;
+   }
+   /**
+    * The text to inject into this turn's user message (built by the preceding onPrompt), or
+@@ -19028,7 +19210,6 @@
+     if (!this.writeBackEnabled) return;
+     const st = this.stateFor(sessionId);
+     if (turns.length <= st.retainedTurns) return;
+-    st.retainedTurns = turns.length;
+     this.retain(sessionId, turns, st.startTs, "idle");
+   }
+   recordUsage(sessionId, turns, lastTurnComplete) {
+@@ -19048,7 +19229,7 @@
+   stateFor(sessionId) {
+     let st = this.sessionState.get(sessionId);
+     if (!st) {
+-      st = { startTs: (/* @__PURE__ */ new Date()).toISOString(), retainedTurns: 0 };
++      st = { startTs: (/* @__PURE__ */ new Date()).toISOString(), retainedTurns: 0, writeBack: Promise.resolve() };
+       this.sessionState.set(sessionId, st);
+     }
+     return st;
+@@ -19073,8 +19254,11 @@
+   /** Fire-and-forget upsert of the session transcript; never throws into the host. */
+   retain(sessionId, turns, startTs, trigger = "turn") {
+     const t0 = Date.now();
+-    const write2 = ensureDaemon(this.cfg, this.harness, { waitMs: DAEMON_WAIT_RETAIN_MS }).then(
+-      () => retainLiveSession(this.client, sessionId, turns, startTs, this.harness, {
++    const st = this.stateFor(sessionId);
++    const write2 = st.writeBack.then(async () => {
++      if (trigger === "idle" && turns.length <= st.retainedTurns) return;
++      await ensureDaemon(this.cfg, this.harness, { waitMs: DAEMON_WAIT_RETAIN_MS });
++      await retainLiveSession(this.client, sessionId, turns, startTs, this.harness, {
+         cursors: this.cursors,
+         stamp: buildRetainStamp(this.cfg, {
+           directory: this.projectDir,
+@@ -19082,15 +19266,15 @@
+           bankId: this.bankId,
+           sessionId
+         })
+-      })
+-    ).then(
+-      () => diag(this.harness, "retain_ok", {
++      });
++      if (trigger === "idle") st.retainedTurns = Math.max(st.retainedTurns, turns.length);
++      diag(this.harness, "retain_ok", {
+         ms: Date.now() - t0,
+         turns: turns.length,
+         session: sessionId,
+         trigger
+-      })
+-    ).catch(
++      });
++    }).catch(
+       (e) => diag(this.harness, "retain_failed", {
+         ms: Date.now() - t0,
+         error: describeError(e),
+@@ -19098,6 +19282,7 @@
+         trigger
+       })
+     );
++    st.writeBack = write2;
+     this.inFlight.add(write2);
+     void write2.finally(() => this.inFlight.delete(write2));
+   }
+@@ -19147,14 +19332,138 @@
+   }
+ }
+ 
++// src/core/runtime-observation.ts
++var OBSERVATION_PROTOCOL = 1;
++var RUNTIME_SERVICE = "hindsightRuntime";
++var OBSERVATION_EVENT = "hindsight/observation";
++function describeRuntime() {
++  return {
++    upstreamVersion: version,
++    patchSetVersion: "2",
++    capabilities: {
++      autoInjectEveryTurns: true,
++      runtimeInspection: true,
++      recallSummary: true,
++      injectionCorrelation: true
++    }
++  };
++}
++var RecallObservation = class {
++  constructor(inspection, scope, signal, scoped) {
++    this.scope = scope;
++    this.signal = signal;
++    this.scoped = scoped;
++    this.record = {
++      protocolVersion: OBSERVATION_PROTOCOL,
++      turn: null,
++      ownerTurn: scope.ownerTurn,
++      recallId: scope.recallId,
++      inspection,
++      requestedMode: inspection.effective?.autoInject ?? null,
++      status: "running",
++      interruption: null,
++      degraded: false,
++      skipReason: null,
++      totalDurationMs: null,
++      stages: [],
++      bodyPresent: null
++    };
++  }
++  scope;
++  signal;
++  scoped;
++  record;
++  startedAt = null;
++  bodyFinished = false;
++  skip(reason) {
++    this.record.status = "skipped";
++    this.record.skipReason = reason;
++  }
++  /** The scope ends before roster fetching; its result must survive later preparation failures. */
++  async body(callback) {
++    try {
++      await this.scoped(callback);
++      this.bodyFinished = true;
++    } finally {
++      if (this.startedAt !== null) {
++        this.record.totalDurationMs = performance.now() - this.startedAt;
++        const stages = this.record.stages;
++        this.record.status = stages.some((s) => s.status === "cancelled") ? "cancelled" : stages.some((s) => s.status === "completed") ? "completed" : stages.some((s) => s.status !== "empty") ? "failed" : "empty";
++        this.record.degraded = this.record.status === "completed" && stages.some((s) => s.status === "failed");
++      }
++    }
++  }
++  async stage(mode, call, count) {
++    const start = performance.now();
++    this.startedAt ??= start;
++    let httpStatus = null;
++    const stage = {
++      mode,
++      status: "failed",
++      durationMs: 0,
++      httpStatus: null,
++      errorKind: null,
++      result: null
++    };
++    try {
++      const value = await call((response) => {
++        httpStatus = response.status;
++      });
++      this.signal.throwIfAborted();
++      stage.httpStatus = httpStatus;
++      if (httpStatus === 404) {
++        stage.status = "not_found";
++        stage.errorKind = "http";
++      } else {
++        const amount = count(value);
++        stage.status = amount > 0 ? "completed" : "empty";
++        stage.result = {
++          unit: mode === "recall" ? "memories" : mode === "pages" ? "pages" : "characters",
++          count: amount
++        };
++      }
++      return value;
++    } catch (error51) {
++      if (this.signal.aborted) {
++        stage.status = "cancelled";
++        stage.errorKind = "cancelled";
++      } else if (error51 instanceof PagesUnavailableError) {
++        stage.status = "unavailable";
++        stage.httpStatus = httpStatus;
++        stage.errorKind = "pages_unavailable";
++      } else if (error51 instanceof RateLimitedError) {
++        stage.httpStatus = 429;
++        stage.errorKind = "rate_limited";
++      } else if (error51 instanceof HttpResponseError || error51 instanceof ReflectError) {
++        stage.httpStatus = error51.status ?? null;
++        stage.errorKind = error51 instanceof ReflectError && error51.timedOut ? "timeout" : "http";
++      } else if (error51 instanceof Error) {
++        stage.errorKind = error51.name === "TimeoutError" || error51.name === "AbortError" ? "timeout" : error51 instanceof SyntaxError ? "invalid_response" : error51.name;
++      } else {
++        stage.errorKind = "unknown";
++      }
++      throw error51;
++    } finally {
++      stage.durationMs = performance.now() - start;
++      this.record.stages.push(stage);
++    }
++  }
++  interrupted() {
++    const kind = this.signal.aborted ? "cancelled" : "failed";
++    if (this.bodyFinished) this.record.interruption = { phase: "preparation", kind };
++    else this.record.status = kind;
++  }
++  snapshot() {
++    return structuredClone(this.record);
++  }
++};
++
+ // src/dsh.ts
+ var HARNESS2 = "dsh";
+ var name = HINDSIGHT_PLUGIN;
+ var inject = ["agents"];
+-var workspaces = /* @__PURE__ */ new Map();
+-var liveAgents = /* @__PURE__ */ new Map();
+ function dshSessionEvents(session) {
+-  return session.snapshotEvents?.() ?? session.events ?? [];
++  return session.snapshotEvents();
+ }
+ function ownEvents(session) {
+   return dshSessionEvents(session).slice(session.inheritedEventCount ?? 0);
+@@ -19162,52 +19471,29 @@
+ function workspaceRoot(agent) {
+   return agent.session.header.cwd || process.cwd();
+ }
+-function workspaceFor(root) {
+-  const cached2 = workspaces.get(root);
+-  if (cached2 !== void 0) return cached2 ?? void 0;
+-  const { cfg, bankId, client } = resolveHostMemory(HARNESS2, root);
+-  if (cfg.disabled) {
+-    workspaces.set(root, null);
+-    return void 0;
+-  }
+-  const core = new RuntimeCore(client, bankId, cfg, HARNESS2, root);
+-  core.setTranscriptSource(async (sessionId) => {
+-    const agent = liveAgents.get(sessionId);
+-    return agent ? readDshEvents(ownEvents(agent.session)) : [];
+-  });
+-  const workspace = { core, root };
+-  workspaces.set(root, workspace);
+-  return workspace;
+-}
+-function ensureSeeded(workspace) {
+-  workspace.seeded ??= workspace.core.seedIfCold(workspace.root);
+-}
+-function workspaceForAgent(agent) {
+-  if (agent.session.header.origin === "subagent") return void 0;
+-  return workspaceFor(workspaceRoot(agent));
+-}
+ function promptOf(messages) {
+   return (messages || []).filter((message) => message?.source?.kind === "user").flatMap((message) => message.content || []).filter((block) => block?.type === "text" && block.text).map((block) => block.text).join("\n").trim();
+ }
+-function injectionMessage(text) {
++function injectionMessage(text, record2) {
+   return {
+     id: randomUUID2(),
+     role: "user",
+     content: [{ type: "text", text }],
+-    source: { kind: `plugin:${HINDSIGHT_PLUGIN}`, form: "recall" }
+-  };
+-}
+-function lastInjectedText(events) {
+-  for (let i = events.length - 1; i >= 0; i--) {
+-    const event = events[i];
+-    if (event?.type !== "user/message") continue;
+-    const message = event.data;
+-    if (message?.source?.kind !== `plugin:${HINDSIGHT_PLUGIN}`) continue;
+-    return (message.content ?? []).map((block) => block.text ?? "").join("\n");
+-  }
+-  return void 0;
+-}
+-function createDshHooks(resolve4) {
++    source: {
++      kind: `plugin:${HINDSIGHT_PLUGIN}`,
++      form: "recall",
++      ...record2 ? {
++        hindsight: {
++          protocolVersion: OBSERVATION_PROTOCOL,
++          ownerTurn: record2.ownerTurn,
++          recallId: record2.recallId,
++          bodyPresent: record2.bodyPresent
++        }
++      } : {}
++    }
++  };
++}
++function createDshHooks(resolve4, liveAgents = /* @__PURE__ */ new Map(), observer) {
+   return {
+     sessionStart({ agent }) {
+       const workspace = resolve4(agent);
+@@ -19215,28 +19501,66 @@
+       liveAgents.set(agent.session.header.id, agent);
+       ensureSeeded(workspace);
+     },
+-    async preStep({ agent, signal }, next) {
++    async preStep({ agent, signal, turn }, next) {
+       const decision = await next();
+       if (decision.kind !== "enter" || signal.aborted) return decision;
+       const workspace = resolve4(agent);
+-      if (!workspace) return decision;
+       const sessionId = agent.session.header.id;
+-      liveAgents.set(sessionId, agent);
+-      ensureSeeded(workspace);
++      if (workspace) {
++        liveAgents.set(sessionId, agent);
++        ensureSeeded(workspace);
++      }
+       const prompt = promptOf(decision.messages);
+       if (!prompt) return decision;
+-      await workspace.core.onPrompt(sessionId, prompt);
++      const scope = { sessionId, ownerTurn: turn, recallId: randomUUID2() };
++      const observation = observer ? new RecallObservation(
++        observer.inspect(agent),
++        scope,
++        signal,
++        (callback) => observer.run(scope, callback)
++      ) : void 0;
++      const report = () => {
++        if (observation) observer.report({ agent, record: observation.snapshot() });
++      };
++      if (!workspace) {
++        observation?.skip(
++          agent.session.header.origin === "subagent" ? "excluded_subagent" : "workspace_disabled"
++        );
++        if (observation) observation.record.bodyPresent = false;
++        report();
++        return decision;
++      }
++      if (observation?.record.inspection.hooksDisabled) {
++        observation.skip("hooks_disabled");
++        observation.record.bodyPresent = false;
++        report();
++        return decision;
++      }
++      report();
++      try {
++        if (observation) await workspace.core.onPrompt(sessionId, prompt, signal, observation);
++        else await workspace.core.onPrompt(sessionId, prompt, signal);
++        if (signal.aborted) {
++          observation?.interrupted();
++          report();
++          return decision;
++        }
++        report();
++      } catch (error51) {
++        observation?.interrupted();
++        report();
++        throw error51;
++      }
+       const injection = workspace.core.getInjection(sessionId);
+       if (!injection) {
+         diag(HARNESS2, "inject_empty", { session: sessionId });
+         return decision;
+       }
+-      if (injection === lastInjectedText(dshSessionEvents(agent.session))) {
+-        diag(HARNESS2, "inject_unchanged", { session: sessionId });
+-        return decision;
+-      }
+       diag(HARNESS2, "inject_ok", { session: sessionId, chars: injection.length });
+-      return { kind: "enter", messages: [...decision.messages, injectionMessage(injection)] };
++      return {
++        ...decision,
++        messages: [...decision.messages, injectionMessage(injection, observation?.record)]
++      };
+     },
+     async turnStopping({ agent }) {
+       const workspace = resolve4(agent);
+@@ -19269,17 +19593,76 @@
+   }
+   return { type: "object", properties, ...required2.length ? { required: required2 } : {} };
+ }
+-async function runSpec(spec, args) {
+-  const result = await spec.handler(args);
++async function runSpec(spec, args, signal) {
++  const result = await spec.handler(args, signal);
+   const text = (result.content || []).map((block) => block.text).join("\n");
+   if (result.isError) throw new Error(text || "hindsight tool failed");
+   return text;
+ }
+-function registerTools(toolCtx, fallbackRoot) {
+-  const template = workspaceFor(fallbackRoot);
+-  if (!template) return;
+-  for (const spec of specsOf(template)) {
+-    toolCtx.tools.register({
++function specsOf(workspace) {
++  workspace.tools ??= workspace.core.toolSpecs();
++  return workspace.tools;
++}
++function ensureSeeded(workspace) {
++  workspace.seeded ??= workspace.core.seedIfCold(workspace.root);
++}
++function createDshRuntime(report) {
++  const retrievalScope = new AsyncLocalStorage2();
++  const workspaces = /* @__PURE__ */ new Map();
++  const liveAgents = /* @__PURE__ */ new Map();
++  let disposed = false;
++  function workspaceFor(root) {
++    if (disposed) return void 0;
++    const cached2 = workspaces.get(root);
++    if (cached2 !== void 0) return cached2 ?? void 0;
++    const { cfg, bankId, client } = resolveHostMemory(HARNESS2, root);
++    if (cfg.disabled) {
++      workspaces.set(root, null);
++      return void 0;
++    }
++    const core = new RuntimeCore(client, bankId, cfg, HARNESS2, root);
++    core.setTranscriptSource(async (sessionId) => {
++      const agent = liveAgents.get(sessionId);
++      return agent ? readDshEvents(ownEvents(agent.session)) : [];
++    });
++    const workspace = { core, root };
++    workspaces.set(root, workspace);
++    return workspace;
++  }
++  function workspaceForAgent(agent) {
++    if (agent.session.header.origin === "subagent") return void 0;
++    return workspaceFor(workspaceRoot(agent));
++  }
++  function inspect(agent) {
++    const inspection = {
++      protocolVersion: OBSERVATION_PROTOCOL,
++      sessionId: agent?.session.header.id ?? null,
++      status: "session_not_active",
++      hooksDisabled: Boolean(process.env.HINDSIGHT_DISABLE_HOOKS),
++      runtime: describeRuntime(),
++      effective: null
++    };
++    if (!agent) return inspection;
++    if (agent.session.header.origin === "subagent") {
++      inspection.status = "excluded_subagent";
++      return inspection;
++    }
++    const workspace = workspaces.get(workspaceRoot(agent));
++    inspection.status = workspace === void 0 ? "workspace_uninitialized" : workspace === null ? "disabled" : "ready";
++    if (workspace) inspection.effective = structuredClone(workspace.core.inspectEffective());
++    return inspection;
++  }
++  const queryScope = () => retrievalScope.getStore();
++  const hooks = createDshHooks(workspaceForAgent, liveAgents, {
++    inspect,
++    run: (scope, callback) => retrievalScope.run(scope, callback),
++    report: (payload) => report?.(payload)
++  });
++  function toolDefinitions(root) {
++    const template = root === void 0 ? void 0 : workspaceFor(root);
++    if (root !== void 0 && !template) return [];
++    const specs = template ? specsOf(template) : buildPageTools();
++    return specs.map((spec) => ({
+       name: spec.name,
+       description: spec.description,
+       parameters: toDshParameters(spec),
+@@ -19288,43 +19671,60 @@
+         render: (_args, value) => [{ type: "text", text: value }]
+       },
+       async execute(args, exec) {
+-        const workspace = exec?.agent ? workspaceForAgent(exec.agent) : template;
+-        if (!workspace) return "Hindsight memory is disabled for this workspace.";
++        const workspace = exec.agent ? workspaceForAgent(exec.agent) : root === void 0 ? void 0 : workspaceFor(root);
++        if (!workspace) throw new Error("Hindsight memory is disabled for this workspace.");
+         const bound = specsOf(workspace).find((candidate) => candidate.name === spec.name);
+-        if (!bound) return `Hindsight tool ${spec.name} is unavailable.`;
+-        return runSpec(bound, args);
+-      }
++        return runSpec(bound, args, exec.signal);
++      }
++    }));
++  }
++  async function refresh() {
++    const old = [...workspaces.values()];
++    workspaces.clear();
++    await Promise.all(old.map((workspace) => workspace?.core.flush()));
++  }
++  async function dispose() {
++    disposed = true;
++    liveAgents.clear();
++    await refresh();
++  }
++  return {
++    hooks,
++    toolDefinitions,
++    workspaceFor,
++    workspaceForAgent,
++    refresh,
++    dispose,
++    inspect,
++    queryScope
++  };
++}
++function registerTools(toolCtx, runtime) {
++  for (const definition of runtime.toolDefinitions()) {
++    toolCtx.tools.register(definition, {
++      when: ({ agent }) => runtime.workspaceForAgent(agent) !== void 0
+     });
+   }
+-  const exposed = toolCtx.tools.schemas?.() ?? [];
+-  log.debug(HARNESS2, "tools registered", {
+-    count: specsOf(template).length,
+-    hostCatalog: exposed.length,
+-    hindsight: exposed.filter((schema) => schema.name?.startsWith("hindsight_")).length
+-  });
+-}
+-function specsOf(workspace) {
+-  workspace.tools ??= workspace.core.toolSpecs();
+-  return workspace.tools;
+ }
+ function apply(ctx) {
+-  const hooks = createDshHooks(workspaceForAgent);
+-  ctx.on("agent/session-start", hooks.sessionStart);
+-  ctx.on("agent/pre-step", hooks.preStep, { prepend: true });
+-  ctx.on("agent/turn-stopping", hooks.turnStopping);
+-  ctx.on("agent/disposed", hooks.disposed);
+-  ctx.inject(["tools"], (toolCtx) => {
+-    registerTools(toolCtx, process.cwd());
+-  });
++  const runtime = createDshRuntime((payload) => ctx.emit(OBSERVATION_EVENT, payload));
++  ctx.provide(RUNTIME_SERVICE, runtime);
++  ctx.on("agent/created", runtime.hooks.sessionStart);
++  ctx.on("agent/pre-step", runtime.hooks.preStep, { prepend: true });
++  ctx.on("agent/turn-stopping", runtime.hooks.turnStopping);
++  ctx.on("agent/disposed", runtime.hooks.disposed);
++  ctx.inject(["tools"], (toolCtx) => registerTools(toolCtx, runtime));
++  ctx.effect(() => () => runtime.dispose());
+ }
+ var dsh_default = { name, inject, apply };
+ export {
+   apply,
+   createDshHooks,
++  createDshRuntime,
+   dsh_default as default,
++  describeRuntime,
+   dshSessionEvents,
+   inject,
+-  lastInjectedText,
+   name,
+   ownEvents,
+   toDshParameters
+--- /dev/null
++++ b/dsh-enhancement.json
+@@ -0,0 +1,14 @@
++{
++  "upstream": {
++    "name": "@vectorize-io/hindsight-coding-agents",
++    "version": "0.8.8"
++  },
++  "patchSetVersion": "2",
++  "capabilities": {
++    "autoInjectEveryTurns": true,
++    "runtimeInspection": true,
++    "recallSummary": true,
++    "injectionCorrelation": true
++  },
++  "defaultsFile": "dsh-memory.config.json"
++}
+--- /dev/null
++++ b/dsh-memory.config.json
+@@ -0,0 +1,12 @@
++{
++  "autoInject": "recall",
++  "autoInjectEveryTurns": 1,
++  "injectTimeoutMs": 7000,
++  "recallOptions": {
++    "types": ["observation", "world", "experience"],
++    "budget": "low",
++    "max_tokens": 2000
++  },
++  "retainSessions": true,
++  "autoUpdate": false
++}
+--- a/package.json
++++ b/package.json
+@@ -6,7 +6,7 @@
+     "url": "https://github.com/vectorize-io/hindsight.git",
+     "directory": "hindsight-integrations/coding-agents"
+   },
+-  "description": "Reflect-only Hindsight long-term memory for coding agents (harness-pluggable: opencode, …), with automatic background ingestion (no setup CLI).",
++  "description": "Reflect-only Hindsight long-term memory for coding agents (harness-pluggable: opencode, \u2026), with automatic background ingestion (no setup CLI).",
+   "type": "module",
+   "main": "dist/index.js",
+   "types": "dist/index.d.ts",
+@@ -68,7 +68,10 @@
+     "index.js",
+     "cordis.patch.yml",
+     "plugin.json",
+-    "hooks"
++    "hooks",
++    "dsh-memory.config.json",
++    "dsh-enhancement.json",
++    "tests"
+   ],
+   "dsh": {
+     "bundle": {
+@@ -94,7 +97,8 @@
+     "prepublishOnly": "npm run clean && npm run skill:build && npm run build",
+     "test": "vitest run --exclude '**/*.e2e.test.ts'",
+     "test:dcode-e2e": "npm run build && HINDSIGHT_DCODE_E2E=1 vitest run src/dcode-plugin.e2e.test.ts",
+-    "test:harness-e2e": "npm run build && HINDSIGHT_HARNESS_E2E=1 vitest run src/harness.e2e.test.ts"
++    "test:harness-e2e": "npm run build && HINDSIGHT_HARNESS_E2E=1 vitest run src/harness.e2e.test.ts",
++    "test:dsh": "node --test --test-isolation=none tests/*.test.mjs"
+   },
+   "devDependencies": {
+     "@modelcontextprotocol/sdk": "^1.29.0",
+@@ -120,5 +124,8 @@
+     "postcss": ">=8.5.23 <9.0.0",
+     "toml": ">=5.0.1 <6.0.0",
+     "vite": ">=6.4.3 <7.0.0"
++  },
++  "engines": {
++    "dsh": "0.2.2-rc.1"
+   }
+ }
+--- a/skill/SKILL.md
++++ b/skill/SKILL.md
+@@ -14,6 +14,10 @@
+ 
+ ## What happens automatically (no action needed)
+ 
++- **Local DSH build**: package-root `dsh-memory.config.json` defaults to `autoInject: "recall"`
++  and `autoInjectEveryTurns: 1`. Each user message retrieves its current topic before the answer;
++  tool continuations do not retrieve again. Conversation write-back remains independent. The
++  session-start synthesis default below applies to other adapters unless explicitly configured.
+ - **Per-repo memory bank**: each repository resolves to a bank (shown in the session banner:
+   `↳ memory bank “coding-agent::<repo>”`). Worktrees share the main repo's bank.
+ - **Ingestion builds itself**: on first open, the bank is seeded from recent commit messages and a
+@@ -218,6 +222,7 @@
+ | `injectTimeoutMs`       | `7000`                               | retrieval timeout in milliseconds for `autoInject: "pages"` and `autoInject: "recall"`; also the **shared** budget for page search then recall after a reflect timeout/5xx (recall gets only the time left after page search). Set e.g. `2000` to limit turn latency or `15000` for a slower self-hosted bank. Environment fallback: `HINDSIGHT_INJECT_TIMEOUT_MS`. On hook harnesses, injection must fit the host's prompt-hook timeout (30s by default); for reflect with fallback, allow for **`reflectTimeoutMs` + `injectTimeoutMs`**, and raise the host hook's `timeout` when needed                                                                                                                                                                                                                                                                                                                     |
+ | `reflectBudget`         | `"high"`                             | reflect budget for the `hindsight_reflect` tool: `"low"`, `"mid"` or `"high"`. Drop it on a large bank where high-budget synthesis exceeds the server's wall timeout. The automatic session-start reflect always uses `"low"` to fit its hook window and is unaffected                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+ | `autoInject`            | `"reflect"`                          | what to inject once, on the session's **first prompt**: `"reflect"` = a low-budget reflect synthesis (on timeout/5xx it falls back to page search, then recall); `"pages"` = the pages matching the prompt by search; `"recall"` = the bank's memories recalled for the prompt (what it asks for is `recallOptions`, observations by default); `"none"` = nothing — the agent searches pages first and reflects only when they are too shallow. `"pages"` and `"recall"` are retrieval only (no LLM), their time budget is `injectTimeoutMs`, and when one finds nothing for the prompt it tries again on the next one, up to 5 prompts                                                                                                                                                                                                                                                                         |
++| `autoInjectEveryTurns`  | `1` in the local DSH policy          | File-only DSH cadence. Reset the retrieval decision every N user messages; 0 keeps the original initial-retrieval policy. Empty results and failures can still retry between scheduled turns.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+ | `autoReflect`           | `true`                               | **deprecated** — use `autoInject`. Still honoured (`false` = `autoInject: "none"`), ignored when `autoInject` is set, and logs a deprecation warning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+ | `pageSearchLimit`       | `3`                                  | pages ONE search returns. Applies to every search of the bank — the `autoInject: "pages"` injection, the reflect fallback, and the agent's own `hindsight_search_pages` tool — because the limit lives on the client they all share                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+ | `recallOptions`         | see description                      | overrides merged key-by-key into the body of every recall — the `autoInject: "recall"` source and the reflect fallback. Keys are the API's own recall parameters, passed straight through, so anything recall accepts is settable without a new option here; `query` is the one field it cannot replace. The default body is `{"types": ["observation"], "budget": "low", "max_tokens": 2000, "include": {"entities": null}}`, and what you set is merged over it one key at a time — `{"max_tokens": 4000}` changes the budget and leaves the rest alone. Observations are the consolidated layer, so they answer best per token, but a bank with **consolidation disabled never grows any** and the default recall comes back empty on it: set `{"types": ["world", "experience"]}` there, or `{"types": null}` for every type. File-only, like `retainMetadata` — an object does not flatten into an env var |
+--- /dev/null
++++ b/tests/dsh-observability.test.mjs
+@@ -0,0 +1,222 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { after, test } from "node:test";
++
++const directory = mkdtempSync(join(tmpdir(), "hindsight-delivery-test-"));
++const configPath = join(directory, "coding-agent.json");
++const workspace = join(directory, "workspace");
++mkdirSync(workspace);
++const previous = new Map(
++  Object.entries(process.env).filter(([name]) => name.startsWith("HINDSIGHT_"))
++);
++for (const name of previous.keys()) delete process.env[name];
++// Existing upstream inputs only isolate these tests from the user's files.
++Object.assign(process.env, {
++  HINDSIGHT_CONFIG: configPath,
++  HINDSIGHT_LOG_FILE: join(directory, "plugin.log"),
++  HINDSIGHT_DIAG_FILE: join(directory, "diagnostics.jsonl"),
++  HINDSIGHT_USAGE_FILE: join(directory, "usage.jsonl"),
++});
++const adapter = await import("../dist/dsh.js");
++const declaration = JSON.parse(readFileSync(new URL("../dsh-enhancement.json", import.meta.url)));
++const originalFetch = globalThis.fetch;
++after(() => {
++  globalThis.fetch = originalFetch;
++  for (const name of Object.keys(process.env).filter((name) => name.startsWith("HINDSIGHT_")))
++    delete process.env[name];
++  for (const [name, value] of previous) process.env[name] = value;
++  rmSync(directory, { recursive: true, force: true });
++});
++
++function fixture(t, options = {}) {
++  writeFileSync(
++    configPath,
++    JSON.stringify({
++      serverMode: "self-hosted",
++      apiUrl: "http://memory.invalid",
++      bankId: "delivery-test",
++      autoInject: "recall",
++      autoInjectEveryTurns: 1,
++      autoSeed: false,
++      autoUpdate: false,
++      retainSessions: false,
++      ...options,
++    })
++  );
++  const reports = [];
++  const requests = [];
++  const unexpected = [];
++  const responses = {
++    recall: () => Response.json({ results: [{ text: "  remembered fact  " }, { text: " " }] }),
++    pages: () => Response.json({ results: [] }),
++    reflect: () => Response.json({ text: "a synthesis" }),
++    tree: () => Response.json({ roots: [] }),
++  };
++  const runtime = adapter.createDshRuntime(({ record }) => reports.push(record));
++  globalThis.fetch = async (input, init = {}) => {
++    const url = new URL(input);
++    assert.equal(url.origin, "http://memory.invalid");
++    requests.push({
++      path: url.pathname,
++      scope: runtime.queryScope(),
++      body: init.body ? JSON.parse(init.body) : null,
++    });
++    if (url.pathname.endsWith("/memories/recall")) return responses.recall(init);
++    if (url.pathname.endsWith("/pages/search")) return responses.pages(init);
++    if (url.pathname.endsWith("/reflect")) return responses.reflect(init);
++    if (url.pathname.endsWith("/pages/tree")) return responses.tree(init);
++    unexpected.push(url.pathname);
++    throw new Error(`Unexpected request: ${url.pathname}`);
++  };
++  const id = randomUUID();
++  const events = [];
++  const agent = {
++    session: { header: { id, cwd: workspace, origin: "user" }, snapshotEvents: () => events },
++  };
++  let turn = 0;
++  t.after(async () => {
++    await runtime.dispose();
++    rmSync(join(tmpdir(), "hindsight-dsh", `${id}.json`), { force: true });
++    assert.deepEqual(unexpected, []);
++  });
++  return {
++    runtime,
++    agent,
++    reports,
++    requests,
++    responses,
++    prepare() {
++      runtime.workspaceFor(workspace).seeded = Promise.resolve();
++    },
++    async prompt(text = "a question", signal = new AbortController().signal) {
++      const decision = {
++        kind: "enter",
++        startsRequestSeries: true,
++        messages: [
++          {
++            id: randomUUID(),
++            role: "user",
++            source: { kind: "user" },
++            content: [{ type: "text", text }],
++          },
++        ],
++      };
++      const result = await runtime.hooks.preStep(
++        { agent, turn: ++turn, signal },
++        async () => decision
++      );
++      for (const message of result.messages) events.push({ type: "user/message", data: message });
++      return result;
++    },
++  };
++}
++
++test("the installed declaration matches executing code; inspection does not initialize a workspace", async (t) => {
++  const f = fixture(t);
++  const cold = f.runtime.inspect(undefined);
++  assert.equal(cold.status, "session_not_active");
++  assert.equal(cold.effective, null);
++  assert.equal(cold.runtime.upstreamVersion, declaration.upstream.version);
++  assert.equal(cold.runtime.patchSetVersion, declaration.patchSetVersion);
++  assert.deepEqual(cold.runtime.capabilities, declaration.capabilities);
++  assert.equal(f.runtime.inspect(f.agent).status, "workspace_uninitialized");
++  assert.equal(f.requests.length, 0);
++  f.prepare();
++  assert.equal(f.runtime.inspect(f.agent).effective.bankId, "delivery-test");
++  writeFileSync(
++    configPath,
++    JSON.stringify({
++      serverMode: "self-hosted",
++      apiUrl: "http://changed.invalid",
++      bankId: "changed",
++    })
++  );
++  assert.equal(f.runtime.inspect(f.agent).effective.bankId, "delivery-test");
++  assert.equal(f.requests.length, 0);
++});
++
++test("recall reports usable results and correlates only its body requests and prepared message", async (t) => {
++  const f = fixture(t);
++  f.prepare();
++  const result = await f.prompt();
++  const record = f.reports.at(-1);
++  assert.equal(record.status, "completed");
++  assert.equal(record.ownerTurn, 1);
++  assert.deepEqual(record.stages[0].result, { unit: "memories", count: 1 });
++  assert.equal(record.stages[0].httpStatus, 200);
++  assert.equal(record.bodyPresent, true);
++  assert.ok(record.totalDurationMs >= 0);
++  const message = result.messages.find((message) => message.source.kind === "plugin:hindsight");
++  assert.equal(message.source.hindsight.recallId, record.recallId);
++  assert.equal(message.source.hindsight.bodyPresent, true);
++  assert.equal(result.startsRequestSeries, true);
++  assert.ok(!JSON.stringify(f.reports).includes("remembered fact"));
++  assert.equal(
++    f.requests.find(({ path }) => path.endsWith("/memories/recall")).scope.recallId,
++    record.recallId
++  );
++  assert.equal(f.requests.find(({ path }) => path.endsWith("/pages/tree")).scope, undefined);
++  const count = f.reports.length;
++  const continuation = { kind: "enter", messages: [] };
++  await f.runtime.hooks.preStep(
++    { agent: f.agent, turn: 1, signal: new AbortController().signal },
++    async () => continuation
++  );
++  assert.equal(f.reports.length, count);
++});
++
++test("HTTP 404 remains distinct from a successful empty response", async (t) => {
++  const f = fixture(t);
++  f.prepare();
++  f.responses.recall = () => Response.json({ detail: "Bank not found" }, { status: 404 });
++  await f.prompt("first");
++  assert.equal(f.reports.at(-1).status, "failed");
++  assert.equal(f.reports.at(-1).stages[0].status, "not_found");
++  assert.equal(f.reports.at(-1).stages[0].result, null);
++  f.responses.recall = () => Response.json({ results: [] });
++  await f.prompt("second");
++  assert.equal(f.reports.at(-1).status, "empty");
++  assert.equal(f.reports.at(-1).stages[0].result.count, 0);
++});
++
++test("reflect fallback reports one logical chain with the final usable result", async (t) => {
++  const f = fixture(t, { autoInject: "reflect" });
++  f.prepare();
++  f.responses.reflect = () => Response.json({ error: "temporarily unavailable" }, { status: 503 });
++  await f.prompt();
++  const record = f.reports.at(-1);
++  assert.equal(record.status, "completed");
++  assert.equal(record.degraded, true);
++  assert.deepEqual(
++    record.stages.map(({ mode, status }) => [mode, status]),
++    [
++      ["reflect", "failed"],
++      ["pages", "empty"],
++      ["recall", "completed"],
++    ]
++  );
++  assert.equal(record.bodyPresent, true);
++});
++
++test("disabling recall still permits the first-turn directory without claiming memory content", async (t) => {
++  const f = fixture(t, { autoInject: "none" });
++  f.prepare();
++  const result = await f.prompt();
++  const record = f.reports.at(-1);
++  assert.equal(record.status, "skipped");
++  assert.equal(record.skipReason, "mode_none");
++  assert.equal(record.bodyPresent, false);
++  assert.equal(record.totalDurationMs, null);
++  assert.equal(
++    result.messages.find((message) => message.source.kind === "plugin:hindsight").source.hindsight
++      .bodyPresent,
++    false
++  );
++  assert.equal(
++    f.requests.some(({ path }) => path.endsWith("/memories/recall")),
++    false
++  );
++});

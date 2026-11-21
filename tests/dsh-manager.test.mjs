@@ -69,7 +69,7 @@ test('the manager loads without a memory runtime and reads inherited official se
     mapPathToBank: { '/tmp': 'shared', '/missing-manager-test-directory': 'missing' },
     harnesses: { dsh: { retainSessions: false } },
   });
-  assert.equal(f.routes.size, 4);
+  assert.equal(f.routes.size, 5);
   assert.equal(f.requests.length, 0);
   const { status, body } = await f.request('state');
   assert.equal(status, 200);
@@ -167,7 +167,7 @@ test('a new installation reads explicit form defaults and writes config only on 
   assert.equal(saved.body.ok, true);
   assert.equal(existsSync(f.configPath), true);
   await f.reload();
-  assert.equal(f.routes.size, 4);
+  assert.equal(f.routes.size, 5);
   assert.equal((await f.request('state')).body.positions[0].bank, 'new');
 });
 
@@ -406,7 +406,7 @@ test('missing or mismatched declarations keep ordinary settings available while 
   assert.equal((await f.request('save', 'POST', { set: { autoInjectEveryTurns: 1 } })).status, 400);
   assert.equal((await f.request('save', 'POST', { inherit: ['autoInjectEveryTurns'] })).status, 200);
   writeFileSync(declarationPath, declaration);
-  writeFileSync(join(officialPackagePath, 'package.json'), JSON.stringify({ ...managerConfig.supportedEnhancement.upstream, version: '0.8.8' }));
+  writeFileSync(join(officialPackagePath, 'package.json'), JSON.stringify({ ...managerConfig.supportedEnhancement.upstream, version: 'unmatched-version' }));
   current = (await f.request('state')).body;
   assert.equal(current.enhancement.status, 'error');
   assert.match(current.enhancement.error, /不一致/);

@@ -15,8 +15,10 @@ export async function registerTests(officialPackagePath) {
     const manifest = JSON.parse(readFileSync(join(officialPackagePath, 'package.json'), 'utf8'));
     const declaration = JSON.parse(readFileSync(join(officialPackagePath, 'dsh-enhancement.json'), 'utf8'));
     assert.deepEqual(declaration, {
-      upstream: { name: '@vectorize-io/hindsight-coding-agents', version: '0.8.7' },
-      patchSetVersion: '1', capabilities: { autoInjectEveryTurns: true },
+      upstream: { name: '@vectorize-io/hindsight-coding-agents', version: '0.8.8' },
+      patchSetVersion: '2', capabilities: {
+        autoInjectEveryTurns: true, runtimeInspection: true, recallSummary: true, injectionCorrelation: true,
+      },
       defaultsFile: 'dsh-memory.config.json',
     });
     assert.equal(manifest.name, declaration.upstream.name);
@@ -62,7 +64,7 @@ export async function registerTests(officialPackagePath) {
         connection: { requestRejection() {} },
         webServer: { register({ path, handler }) { routes.set(path, handler); return () => routes.delete(path); } },
         effect(callback) { cleanups.push(callback()); },
-        inject(_services, callback) { callback(context); },
+        inject(services, callback) { if (services.every((name) => name in context)) return callback(context); },
       };
       manager.apply(context, { configPath, officialPackagePath });
       const requests = [];
@@ -143,11 +145,12 @@ export async function registerTests(officialPackagePath) {
     }
 
     async function prompt(runtime, agent, text, signal = new AbortController().signal) {
+      const turn = agent.session.events.filter((event) => event.type === 'user/message' && event.data.source.kind === 'user').length + 1;
       const decision = {
         kind: 'enter', startsRequestSeries: true,
         messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] }],
       };
-      const result = await runtime.hooks.preStep({ agent, signal }, async () => decision);
+      const result = await runtime.hooks.preStep({ agent, turn, signal }, async () => decision);
       for (const data of result.messages) agent.session.events.push({ type: 'user/message', data });
       return result.messages.filter((message) => message.source.kind === 'plugin:hindsight')
         .flatMap((message) => message.content.map(({ text: value }) => value)).join('\n');
@@ -273,6 +276,8 @@ export async function registerTests(officialPackagePath) {
       assert.equal(f.matching('/pages/tree').length, 1);
       const registrations = [];
       adapter.apply({
+        provide() {},
+        emit() {},
         on() {},
         inject(_services, callback) { callback({ tools: { register(definition) { registrations.push(definition); } } }); },
         effect(callback) { t.after(callback()); },

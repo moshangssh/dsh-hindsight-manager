@@ -10,6 +10,7 @@ export const inject = ['webServer', 'connection'];
 
 const ACTION_ROUTES = {
   state: '/plugins/dsh-hindsight-manager/state',
+  runtime: '/plugins/dsh-hindsight-manager/runtime',
   test: '/plugins/dsh-hindsight-manager/test',
   save: '/plugins/dsh-hindsight-manager/save',
   banks: '/plugins/dsh-hindsight-manager/banks',
@@ -275,7 +276,21 @@ function saveSettings(configPath, patch, settings = managerConfig) {
 }
 
 export async function apply(ctx, config = {}) {
-  const activityReady = registerActivity(ctx);
+  let runtime;
+  let agents;
+  ctx.inject(['hindsightRuntime'], (owner) => {
+    owner.effect(() => {
+      runtime = owner.hindsightRuntime;
+      return () => { runtime = undefined; };
+    }, 'hindsight-manager: runtime inspection');
+  });
+  ctx.inject(['agents'], (owner) => {
+    owner.effect(() => {
+      agents = owner.agents;
+      return () => { agents = undefined; };
+    }, 'hindsight-manager: active agents');
+  });
+  const activityReady = registerActivity(ctx, () => runtime);
   const settings = { ...managerConfig, ...config };
   const configPath = normalizeDir(settings.configPath);
   const readCurrentSettings = () => readSettings(configPath, settings);
@@ -381,6 +396,25 @@ export async function apply(ctx, config = {}) {
     register(ACTION_ROUTES.state, async (req, res) => {
       if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
       sendJson(res, 200, readCurrentSettings());
+    });
+
+    register(ACTION_ROUTES.runtime, (req, res) => {
+      if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
+      const sessionId = new URLSearchParams(req.url.split('?')[1]).get('sessionId');
+      if (!sessionId) return sendJson(res, 400, { error: 'sessionId is required' });
+      if (!runtime) {
+        return sendJson(res, 200, {
+          protocolVersion: 1, sessionId, status: 'runtime_unavailable',
+          hooksDisabled: null, runtime: null, effective: null,
+        });
+      }
+      // get() reads the active registry. A historical session is never resumed
+      // merely to inspect it; inspect(undefined) still describes the provider.
+      const inspection = runtime.inspect(agents?.get(sessionId));
+      sendJson(res, 200, {
+        ...inspection, sessionId,
+        ...(!agents ? { status: 'agent_service_unavailable' } : {}),
+      });
     });
 
     register(

@@ -1,0 +1,3075 @@
+--- a/hindsight-integrations/coding-agents/README.md
++++ b/hindsight-integrations/coding-agents/README.md
+@@ -372,6 +372,26 @@
+ too: the package ships the profile patch layer, so nothing else needs editing. Either route gets the
+ companion skill — a plugin wired by the host's own plugin manager installs it itself on the first
+ session, since that route never runs our installer.
++
++##### Local DSH enhancement
++
++This local build targets DSH 0.2.2-rc.1. Its package-root `dsh-memory.config.json` supplies DSH
++file defaults before the user's global, harness, path and bank settings. The default is direct
++recall on every user message with independent conversation write-back; no new environment inputs
++are added. `autoInjectEveryTurns` resets the cached decision on turns 1, 1+N, 1+2N; 0 retains the
++original initial-retrieval policy. Empty and failed results may still retry between scheduled turns.
++Tool continuations do not retrieve again. The existing first-turn page-preamble behavior is retained.
++
++The DSH adapter provides a read-only `hindsightRuntime` service and emits `hindsight/observation`
++records for the companion manager. Inspection reads the already initialized workspace; it does
++not create a client or resume a historical session. Summaries report the current retrieval result,
++HTTP failures, fallback stages and elapsed time without adding Hindsight requests. The manager
++confirms memory-body submission from the host's committed message, independently of retrieval.
++These records contain no query or memory text and do not enter model context.
++
++Restart DSH after changing the saved configuration. The current runtime caches each workspace,
++so a new session in an existing workspace may still use its old values. The package declaration
++`dsh-enhancement.json` describes the installation; the running service reports the executing build.
+ 
+ #### <img src="https://hindsight.vectorize.io/img/harness/workbuddy.png" alt="" width="20" height="20" /> WorkBuddy
+ 
+@@ -675,6 +695,7 @@
+ | `injectTimeoutMs`       | `7000`                               | retrieval timeout in milliseconds for `autoInject: "pages"` and `autoInject: "recall"`; also the **shared** budget for page search then recall after a reflect timeout/5xx (recall gets only the time left after page search). Set e.g. `2000` to limit turn latency or `15000` for a slower self-hosted bank. Environment fallback: `HINDSIGHT_INJECT_TIMEOUT_MS`. On hook harnesses, injection must fit the host's prompt-hook timeout (30s by default); for reflect with fallback, allow for **`reflectTimeoutMs` + `injectTimeoutMs`**, and raise the host hook's `timeout` when needed                                                                                                                                                                                                                                                                                                                     |
+ | `reflectBudget`         | `"high"`                             | reflect budget for the `hindsight_reflect` tool: `"low"`, `"mid"` or `"high"`. Drop it on a large bank where high-budget synthesis exceeds the server's wall timeout. The automatic session-start reflect always uses `"low"` to fit its hook window and is unaffected                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+ | `autoInject`            | `"reflect"`                          | what to inject once, on the session's **first prompt**: `"reflect"` = a low-budget reflect synthesis (on timeout/5xx it falls back to page search, then recall); `"pages"` = the pages matching the prompt by search; `"recall"` = the bank's memories recalled for the prompt (what it asks for is `recallOptions`, observations by default); `"none"` = nothing — the agent searches pages first and reflects only when they are too shallow. `"pages"` and `"recall"` are retrieval only (no LLM), their time budget is `injectTimeoutMs`, and when one finds nothing for the prompt it tries again on the next one, up to 5 prompts                                                                                                                                                                                                                                                                         |
++| `autoInjectEveryTurns`  | `1` in the local DSH policy          | File-only DSH cadence. Reset the retrieval decision every N user messages; 0 keeps the original initial-retrieval policy. Empty results and failures can still retry between scheduled turns.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+ | `autoReflect`           | `true`                               | **deprecated** — use `autoInject`. Still honoured (`false` = `autoInject: "none"`), ignored when `autoInject` is set, and logs a deprecation warning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+ | `pageSearchLimit`       | `3`                                  | pages ONE search returns. Applies to every search of the bank — the `autoInject: "pages"` injection, the reflect fallback, and the agent's own `hindsight_search_pages` tool — because the limit lives on the client they all share                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+ | `recallOptions`         | see description                      | overrides merged key-by-key into the body of every recall — the `autoInject: "recall"` source and the reflect fallback. Keys are the API's own recall parameters, passed straight through, so anything recall accepts is settable without a new option here; `query` is the one field it cannot replace. The default body is `{"types": ["observation"], "budget": "low", "max_tokens": 2000, "include": {"entities": null}}`, and what you set is merged over it one key at a time — `{"max_tokens": 4000}` changes the budget and leaves the rest alone. Observations are the consolidated layer, so they answer best per token, but a bank with **consolidation disabled never grows any** and the default recall comes back empty on it: set `{"types": ["world", "experience"]}` there, or `{"types": null}` for every type. File-only, like `retainMetadata` — an object does not flatten into an env var |
+--- /dev/null
++++ b/hindsight-integrations/coding-agents/dsh-enhancement.json
+@@ -0,0 +1,14 @@
++{
++  "upstream": {
++    "name": "@vectorize-io/hindsight-coding-agents",
++    "version": "0.8.8"
++  },
++  "patchSetVersion": "2",
++  "capabilities": {
++    "autoInjectEveryTurns": true,
++    "runtimeInspection": true,
++    "recallSummary": true,
++    "injectionCorrelation": true
++  },
++  "defaultsFile": "dsh-memory.config.json"
++}
+--- /dev/null
++++ b/hindsight-integrations/coding-agents/dsh-memory.config.json
+@@ -0,0 +1,12 @@
++{
++  "autoInject": "recall",
++  "autoInjectEveryTurns": 1,
++  "injectTimeoutMs": 7000,
++  "recallOptions": {
++    "types": ["observation", "world", "experience"],
++    "budget": "low",
++    "max_tokens": 2000
++  },
++  "retainSessions": true,
++  "autoUpdate": false
++}
+--- a/hindsight-integrations/coding-agents/package.json
++++ b/hindsight-integrations/coding-agents/package.json
+@@ -6,7 +6,7 @@
+     "url": "https://github.com/vectorize-io/hindsight.git",
+     "directory": "hindsight-integrations/coding-agents"
+   },
+-  "description": "Reflect-only Hindsight long-term memory for coding agents (harness-pluggable: opencode, …), with automatic background ingestion (no setup CLI).",
++  "description": "Reflect-only Hindsight long-term memory for coding agents (harness-pluggable: opencode, \u2026), with automatic background ingestion (no setup CLI).",
+   "type": "module",
+   "main": "dist/index.js",
+   "types": "dist/index.d.ts",
+@@ -68,7 +68,10 @@
+     "index.js",
+     "cordis.patch.yml",
+     "plugin.json",
+-    "hooks"
++    "hooks",
++    "dsh-memory.config.json",
++    "dsh-enhancement.json",
++    "tests"
+   ],
+   "dsh": {
+     "bundle": {
+@@ -92,9 +95,10 @@
+     "skill:build": "node scripts/build-skill.mjs",
+     "clean": "rm -rf dist",
+     "prepublishOnly": "npm run clean && npm run skill:build && npm run build",
+-    "test": "vitest run --exclude '**/*.e2e.test.ts'",
++    "test": "vitest run src --exclude '**/*.e2e.test.ts'",
+     "test:dcode-e2e": "npm run build && HINDSIGHT_DCODE_E2E=1 vitest run src/dcode-plugin.e2e.test.ts",
+-    "test:harness-e2e": "npm run build && HINDSIGHT_HARNESS_E2E=1 vitest run src/harness.e2e.test.ts"
++    "test:harness-e2e": "npm run build && HINDSIGHT_HARNESS_E2E=1 vitest run src/harness.e2e.test.ts",
++    "test:dsh": "node --test --test-isolation=none tests/*.test.mjs"
+   },
+   "devDependencies": {
+     "@modelcontextprotocol/sdk": "^1.29.0",
+@@ -120,5 +124,8 @@
+     "postcss": ">=8.5.23 <9.0.0",
+     "toml": ">=5.0.1 <6.0.0",
+     "vite": ">=6.4.3 <7.0.0"
++  },
++  "engines": {
++    "dsh": "0.2.2-rc.1"
+   }
+ }
+--- a/hindsight-integrations/coding-agents/skill-src/preamble.md
++++ b/hindsight-integrations/coding-agents/skill-src/preamble.md
+@@ -11,6 +11,10 @@
+ 
+ ## What happens automatically (no action needed)
+ 
++- **Local DSH build**: package-root `dsh-memory.config.json` defaults to `autoInject: "recall"`
++  and `autoInjectEveryTurns: 1`. Each user message retrieves its current topic before the answer;
++  tool continuations do not retrieve again. Conversation write-back remains independent. The
++  session-start synthesis default below applies to other adapters unless explicitly configured.
+ - **Per-repo memory bank**: each repository resolves to a bank (shown in the session banner:
+   `↳ memory bank “coding-agent::<repo>”`). Worktrees share the main repo's bank.
+ - **Ingestion builds itself**: on first open, the bank is seeded from recent commit messages and a
+--- a/hindsight-integrations/coding-agents/skill/SKILL.md
++++ b/hindsight-integrations/coding-agents/skill/SKILL.md
+@@ -14,6 +14,10 @@
+ 
+ ## What happens automatically (no action needed)
+ 
++- **Local DSH build**: package-root `dsh-memory.config.json` defaults to `autoInject: "recall"`
++  and `autoInjectEveryTurns: 1`. Each user message retrieves its current topic before the answer;
++  tool continuations do not retrieve again. Conversation write-back remains independent. The
++  session-start synthesis default below applies to other adapters unless explicitly configured.
+ - **Per-repo memory bank**: each repository resolves to a bank (shown in the session banner:
+   `↳ memory bank “coding-agent::<repo>”`). Worktrees share the main repo's bank.
+ - **Ingestion builds itself**: on first open, the bank is seeded from recent commit messages and a
+@@ -218,6 +222,7 @@
+ | `injectTimeoutMs`       | `7000`                               | retrieval timeout in milliseconds for `autoInject: "pages"` and `autoInject: "recall"`; also the **shared** budget for page search then recall after a reflect timeout/5xx (recall gets only the time left after page search). Set e.g. `2000` to limit turn latency or `15000` for a slower self-hosted bank. Environment fallback: `HINDSIGHT_INJECT_TIMEOUT_MS`. On hook harnesses, injection must fit the host's prompt-hook timeout (30s by default); for reflect with fallback, allow for **`reflectTimeoutMs` + `injectTimeoutMs`**, and raise the host hook's `timeout` when needed                                                                                                                                                                                                                                                                                                                     |
+ | `reflectBudget`         | `"high"`                             | reflect budget for the `hindsight_reflect` tool: `"low"`, `"mid"` or `"high"`. Drop it on a large bank where high-budget synthesis exceeds the server's wall timeout. The automatic session-start reflect always uses `"low"` to fit its hook window and is unaffected                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+ | `autoInject`            | `"reflect"`                          | what to inject once, on the session's **first prompt**: `"reflect"` = a low-budget reflect synthesis (on timeout/5xx it falls back to page search, then recall); `"pages"` = the pages matching the prompt by search; `"recall"` = the bank's memories recalled for the prompt (what it asks for is `recallOptions`, observations by default); `"none"` = nothing — the agent searches pages first and reflects only when they are too shallow. `"pages"` and `"recall"` are retrieval only (no LLM), their time budget is `injectTimeoutMs`, and when one finds nothing for the prompt it tries again on the next one, up to 5 prompts                                                                                                                                                                                                                                                                         |
++| `autoInjectEveryTurns`  | `1` in the local DSH policy          | File-only DSH cadence. Reset the retrieval decision every N user messages; 0 keeps the original initial-retrieval policy. Empty results and failures can still retry between scheduled turns.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+ | `autoReflect`           | `true`                               | **deprecated** — use `autoInject`. Still honoured (`false` = `autoInject: "none"`), ignored when `autoInject` is set, and logs a deprecation warning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+ | `pageSearchLimit`       | `3`                                  | pages ONE search returns. Applies to every search of the bank — the `autoInject: "pages"` injection, the reflect fallback, and the agent's own `hindsight_search_pages` tool — because the limit lives on the client they all share                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+ | `recallOptions`         | see description                      | overrides merged key-by-key into the body of every recall — the `autoInject: "recall"` source and the reflect fallback. Keys are the API's own recall parameters, passed straight through, so anything recall accepts is settable without a new option here; `query` is the one field it cannot replace. The default body is `{"types": ["observation"], "budget": "low", "max_tokens": 2000, "include": {"entities": null}}`, and what you set is merged over it one key at a time — `{"max_tokens": 4000}` changes the budget and leaves the rest alone. Observations are the consolidated layer, so they answer best per token, but a bank with **consolidation disabled never grows any** and the default recall comes back empty on it: set `{"types": ["world", "experience"]}` there, or `{"types": null}` for every type. File-only, like `retainMetadata` — an object does not flatten into an env var |
+--- a/hindsight-integrations/coding-agents/src/core/chat.test.ts
++++ b/hindsight-integrations/coding-agents/src/core/chat.test.ts
+@@ -437,10 +437,12 @@
+ 
+     // A budget that fits the replay and nothing after it: the new tail stays buffered for the next
+     // write-back instead of overrunning the deadline the host kills the hook at.
+-    await retainLiveSession(client, "s1", turns(6), "2026-01-01T00:00:00Z", "codex", {
+-      cursors,
+-      retryUntil: Date.now(),
+-    });
++    await expect(
++      retainLiveSession(client, "s1", turns(6), "2026-01-01T00:00:00Z", "codex", {
++        cursors,
++        retryUntil: Date.now(),
++      })
++    ).rejects.toThrow("pending appends");
+     expect(retain).toHaveBeenCalledTimes(3);
+     expect(cursors.read("s1")?.pending).toHaveLength(1);
+ 
+--- a/hindsight-integrations/coding-agents/src/core/chat.ts
++++ b/hindsight-integrations/coding-agents/src/core/chat.ts
+@@ -475,7 +475,8 @@
+     // by its host at `retryUntil` (retain-hook's hostDeadline), and a flush that overruns it buys
+     // nothing. The first entry always goes out, so a chronically short budget still makes progress;
+     // whatever is left is already durable, so the next write-back sends it.
+-    if (i > 0 && Date.now() + REQUEST_BUDGET_MS > retryUntil) return;
++    if (i > 0 && Date.now() + REQUEST_BUDGET_MS > retryUntil)
++      throw new Error("Retain retry budget exhausted with pending appends");
+     const entry = queue[i];
+     await submitWithRetry(
+       () => submit(entry.content, entry.operationId, true),
+--- a/hindsight-integrations/coding-agents/src/core/config.ts
++++ b/hindsight-integrations/coding-agents/src/core/config.ts
+@@ -11,6 +11,7 @@
+  * surface (untrusted repos influencing memory behavior) and a second place to look. Per-repo bank
+  * routing is `mapPathToBank`; per-agent differences are `harnesses.<name>`.
+  */
++import { readDshPolicy } from "../dsh-policy";
+ import { readFileSync } from "node:fs";
+ import { homedir } from "node:os";
+ import { join } from "node:path";
+@@ -130,6 +131,8 @@
+    *    "recall"  — the bank's memories recalled for the prompt (`recallOptions`; no LLM)
+    *    "none"    — nothing; the tool guide routes new goals through pages before optional reflection */
+   autoInject?: AutoInject;
++  /** DSH retrieval cadence; zero retains the upstream session-start policy. File-only. */
++  autoInjectEveryTurns?: number;
+   /** @deprecated Use `autoInject`. Still honoured: false = `autoInject: "none"`, true = "reflect";
+    *  ignored when `autoInject` is set. Setting it logs a deprecation warning. */
+   autoReflect?: boolean;
+@@ -329,6 +332,7 @@
+   injectTimeoutMs: number;
+   reflectBudget: "low" | "mid" | "high";
+   autoInject: AutoInject;
++  autoInjectEveryTurns?: number;
+   pageSearchLimit: number;
+   recallOptions: Record<string, unknown>;
+   toolGuideExtra?: string;
+@@ -636,6 +640,7 @@
+     injectTimeoutMs: raw.injectTimeoutMs || DEFAULT_INJECT_TIMEOUT_MS,
+     reflectBudget: resolveReflectBudget(raw),
+     autoInject: resolveAutoInject(raw),
++    autoInjectEveryTurns: raw.autoInjectEveryTurns,
+     pageSearchLimit: raw.pageSearchLimit || DEFAULT_PAGE_SEARCH_LIMIT,
+     // Same shape as retainMetadata: an object, or nothing. An array would spread into numeric
+     // keys and reach the API as garbage, so it is rejected like any other non-object.
+@@ -866,7 +871,8 @@
+   const o: LoadOptions = typeof opts === "string" ? { path: opts } : opts; // legacy: loadConfig(path)
+   // Env first so the FILE wins on any field it sets.
+   const withEnv = applyLayer({}, readEnvConfig(), o.harness);
+-  const raw = applyLayer(withEnv, readRaw(o.path ?? CONFIG_PATH), o.harness);
++  const defaults = o.harness === "dsh" ? mergeRaw(withEnv, readDshPolicy()) : withEnv;
++  const raw = applyLayer(defaults, readRaw(o.path ?? CONFIG_PATH), o.harness);
+   // The harness that ASKED is the correct fallback for an unset `harness` field — not a hardcoded
+   // "opencode", whose silent default misfiled every other harness's background seed into an
+   // `opencode::<project>` bank (#3247). An explicit `harness:` in the config file still wins.
+--- a/hindsight-integrations/coding-agents/src/core/hindsight.ts
++++ b/hindsight-integrations/coding-agents/src/core/hindsight.ts
+@@ -5,6 +5,8 @@
+  * (missions + git/chat retain strategies), retains memories, reflects, drains async operations, and
+  * creates pages. Nothing here knows about opencode/claude-code/etc.
+  */
++import { AsyncLocalStorage } from "node:async_hooks";
++import { setTimeout as sleepWithSignal } from "node:timers/promises";
+ import {
+   type BankOverrides,
+   buildPageTrigger,
+@@ -24,6 +26,42 @@
+ import { version as PKG_VERSION } from "../../package.json";
+ import { pool, semverGte, sleep } from "./util";
+ import type { RetainStamp } from "./retain-stamp";
++
++const callerCancellation = new AsyncLocalStorage<AbortSignal | undefined>();
++
++export function throwIfCallerAborted(): void {
++  callerCancellation.getStore()?.throwIfAborted();
++}
++
++export function withCallerSignal<T>(
++  signal: AbortSignal | undefined,
++  callback: () => Promise<T>
++): Promise<T> {
++  return callerCancellation.run(signal, async () => {
++    signal?.throwIfAborted();
++    try {
++      const result = await callback();
++      signal?.throwIfAborted();
++      return result;
++    } catch (error) {
++      signal?.throwIfAborted();
++      throw error;
++    }
++  });
++}
++
++export type ResponseObserver = (response: Response) => void;
++
++/** Distinguishes a final HTTP failure from a transport/body-read failure after a prior response. */
++export class HttpResponseError extends Error {
++  constructor(
++    message: string,
++    readonly status: number
++  ) {
++    super(message);
++    this.name = "HttpResponseError";
++  }
++}
+ 
+ /** Sent on every request so the server can tell which integration is calling. */
+ export const USER_AGENT = `hindsight-coding-agents/${PKG_VERSION}`;
+@@ -208,6 +246,7 @@
+         .toLowerCase() === "not found"
+     );
+   } catch {
++    throwIfCallerAborted();
+     // No JSON body at all (a proxy's HTML/plain-text 404, a bare gateway response). This used to
+     // latch, but a reverse proxy answers exactly this while the backend restarts, and the latch
+     // never expires — pages stayed off for the life of the process (#5071). Only our
+@@ -435,6 +474,7 @@
+     try {
+       next = this.tokenProvider();
+     } catch {
++      throwIfCallerAborted();
+       return false; // a half-written config file must never drop the last credential that worked
+     }
+     if (next === this.token) return false;
+@@ -453,12 +493,31 @@
+    * free even for retain. The retry shares the caller's `signal`, deliberately: one deadline still
+    * bounds the whole call.
+    */
+-  private async fetchWithAuth(url: string, init: RequestInit): Promise<Response> {
++  private async fetchWithAuth(
++    url: string,
++    init: RequestInit,
++    onResponse?: ResponseObserver
++  ): Promise<Response> {
+     // Only a request with its own deadline drops undici's timeouts; the drain poll has none.
+-    const dispatcher = init.signal ? signalOnlyDispatcher() : undefined;
+-    const send = () =>
+-      fetch(url, { ...init, headers: this.headers(), ...(dispatcher ? { dispatcher } : {}) });
++    const callerSignal = callerCancellation.getStore();
++    const signal =
++      callerSignal && init.signal
++        ? AbortSignal.any([callerSignal, init.signal])
++        : (callerSignal ?? init.signal);
++    const dispatcher = signal ? signalOnlyDispatcher() : undefined;
++    const send = async () => {
++      callerSignal?.throwIfAborted();
++      const response = await fetch(url, {
++        ...init,
++        signal,
++        headers: this.headers(),
++        ...(dispatcher ? { dispatcher } : {}),
++      });
++      onResponse?.(response);
++      return response;
++    };
+     const r = await send();
++    callerSignal?.throwIfAborted();
+     if (r.status !== 401 || !this.refreshToken()) return r;
+     return send();
+   }
+@@ -482,33 +541,38 @@
+     url: string,
+     body?: unknown,
+     tolerate: number[] = [],
+-    timeoutMs = 15_000
++    timeoutMs = 15_000,
++    onResponse?: ResponseObserver
+   ): Promise<Response> {
+     // Hard cap on EVERY request: a stalled server (pool deadlock, network) must degrade to a
+     // memoryless turn — never hang a host that awaits us (opencode blocks its BOOT on plugin init).
+     const payload = body ? JSON.stringify(body) : undefined;
+     let r: Response;
+     for (let attempt = 0, waited = 0; ; attempt++) {
+-      r = await this.fetchWithAuth(url, {
+-        method,
+-        body: payload,
+-        signal: AbortSignal.timeout(timeoutMs),
+-      });
++      r = await this.fetchWithAuth(
++        url,
++        {
++          method,
++          body: payload,
++          signal: AbortSignal.timeout(timeoutMs),
++        },
++        onResponse
++      );
+       if (r.status !== 429 || tolerate.includes(429)) break;
+       const asked = retryAfterMs(r.headers.get("retry-after"));
+       const backoff = Math.min(RETRY_AFTER_CEILING_MS, RATE_LIMIT_BACKOFF_MS * 2 ** attempt);
+       const wait =
+         Math.min(RETRY_AFTER_CEILING_MS, Math.max(asked, backoff)) * (1 + Math.random() / 2);
+       if (waited + wait > this.rateLimitPatienceMs) throw new RateLimitedError(asked);
+-      await sleep(wait);
++      await sleepWithSignal(wait, undefined, { signal: callerCancellation.getStore() });
+       waited += wait;
+     }
+-    if (!r.ok && r.status !== 404 && !tolerate.includes(r.status))
+-      throw new Error(
+-        // Query dropped: an encoded search query filled the 200-char error cap and pushed the
+-        // status and the server's reason out of the tool error (#6341).
+-        `${method} ${url.split("?")[0]} -> ${r.status} ${await r.text()}${this.authHint(r.status)}`
+-      );
++    if (!r.ok && r.status !== 404 && !tolerate.includes(r.status)) {
++      // Query text is omitted as before. Only opted-in observation needs the typed status;
++      // existing harness/tool callers retain their original Error contract.
++      const message = `${method} ${url.split("?")[0]} -> ${r.status} ${await r.text()}${this.authHint(r.status)}`;
++      throw onResponse ? new HttpResponseError(message, r.status) : new Error(message);
++    }
+     return r;
+   }
+ 
+@@ -538,11 +602,14 @@
+     if (opts.updateMode) item.update_mode = opts.updateMode;
+     const body: Record<string, unknown> = { items: [item], async: true };
+     if (opts.operationId) body.operation_id = opts.operationId;
+-    const r = await this.req("POST", this.bankUrl("/memories"), body);
++    const url = this.bankUrl("/memories");
++    const r = await this.req("POST", url, body);
++    if (!r.ok) throw new Error(`POST ${url} -> ${r.status} ${await r.text()}`);
+     try {
+       const j = (await r.json()) as { operation_id?: string };
+       if (j.operation_id) this.opIds.push(j.operation_id);
+     } catch {
++      throwIfCallerAborted();
+       /* ignore */
+     }
+   }
+@@ -576,6 +643,7 @@
+         const j = (await r.json()) as { api_version?: string };
+         return semverGte(j.api_version, MIN_IDEMPOTENT_RETAIN_VERSION);
+       } catch {
++        throwIfCallerAborted();
+         /* unreachable or not our API's JSON — try the next path */
+       }
+     }
+@@ -596,6 +664,7 @@
+       const j = (await r.json()) as { config?: { store_document_text?: boolean } };
+       return j.config?.store_document_text !== false;
+     } catch {
++      throwIfCallerAborted();
+       return true;
+     }
+   }
+@@ -621,6 +690,7 @@
+         items = j.items || [];
+         total = j.total ?? 0;
+       } catch {
++        throwIfCallerAborted();
+         break;
+       }
+       for (const it of items) if (it.id) ids.add(it.id);
+@@ -740,6 +810,7 @@
+       const j = (await r.json()) as { overrides?: BankOverrides };
+       return j.overrides ?? {};
+     } catch {
++      throwIfCallerAborted();
+       return undefined;
+     }
+   }
+@@ -762,6 +833,7 @@
+       const ops = j.operations ?? j.items ?? [];
+       return ops.filter((o) => !TERMINAL.has((o?.status || "").toLowerCase())).length;
+     } catch {
++      throwIfCallerAborted();
+       return 0;
+     }
+   }
+@@ -817,6 +889,7 @@
+             if (st !== "completed") failed++;
+           }
+         } catch {
++          throwIfCallerAborted();
+           /* transient — retry next cycle */
+         }
+       });
+@@ -838,15 +911,22 @@
+    * tool (minutes, on a populated bank). This used to default to 120s, which silently overrode the
+    * tool's configured window and aborted every high-budget synthesis mid-flight (#3590).
+    */
+-  async reflect(query: string, opts: { budget?: string; timeoutMs: number }): Promise<string> {
++  async reflect(
++    query: string,
++    opts: { budget?: string; timeoutMs: number; onResponse?: ResponseObserver }
++  ): Promise<string> {
+     const ctrl = new AbortController();
+     const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs);
+     try {
+-      const resp = await this.fetchWithAuth(this.bankUrl("/reflect"), {
+-        method: "POST",
+-        body: JSON.stringify({ query, budget: opts.budget ?? "high" }),
+-        signal: ctrl.signal,
+-      });
++      const resp = await this.fetchWithAuth(
++        this.bankUrl("/reflect"),
++        {
++          method: "POST",
++          body: JSON.stringify({ query, budget: opts.budget ?? "high" }),
++          signal: ctrl.signal,
++        },
++        opts.onResponse
++      );
+       // Keep the server's body: a bare "reflect 500" in the diag trail is undebuggable after the fact.
+       if (!resp.ok)
+         throw new ReflectError(
+@@ -857,6 +937,7 @@
+       const data = (await resp.json()) as { text?: string };
+       return (data.text || "").trim();
+     } catch (e) {
++      throwIfCallerAborted();
+       // Our own deadline surfaces as a generic "This operation was aborted"; name it.
+       if (ctrl.signal.aborted)
+         throw new ReflectError(`reflect timed out after ${opts.timeoutMs}ms`, undefined, true, {
+@@ -877,7 +958,10 @@
+    * kept deliberately: this is the client's published surface, so renaming it would break
+    * importers for a cosmetic gain. The doc above is the contract, not the name.
+    */
+-  async recallObservations(query: string, opts: { timeoutMs: number }): Promise<string[]> {
++  async recallObservations(
++    query: string,
++    opts: { timeoutMs: number; onResponse?: ResponseObserver }
++  ): Promise<string[]> {
+     const r = await this.req(
+       "POST",
+       this.bankUrl("/memories/recall"),
+@@ -886,7 +970,8 @@
+       // wrong question on every turn.
+       { ...this.recallOptions, query },
+       [],
+-      opts.timeoutMs
++      opts.timeoutMs,
++      opts.onResponse
+     );
+     if (r.status === 404) return [];
+     const j = (await r.json()) as { results?: { text?: string }[] };
+@@ -914,10 +999,11 @@
+     sub: string,
+     body?: unknown,
+     tolerate: number[] = [],
+-    timeoutMs?: number
++    timeoutMs?: number,
++    onResponse?: ResponseObserver
+   ): Promise<Response | null> {
+     const send = (legacy: boolean) =>
+-      this.req(method, this.bankUrl(pagesPath(sub, legacy)), body, tolerate, timeoutMs);
++      this.req(method, this.bankUrl(pagesPath(sub, legacy)), body, tolerate, timeoutMs, onResponse);
+     let r = await send(this.legacyPagesPaths);
+     if (r.status !== 404 || !(await isEndpointMissing(r))) return r;
+     if (!this.legacyPagesPaths) {
+@@ -946,6 +1032,7 @@
+     try {
+       return ((await r.json()) as { roots?: PageNode[] }).roots ?? [];
+     } catch {
++      throwIfCallerAborted();
+       return [];
+     }
+   }
+@@ -998,13 +1085,20 @@
+    *  hindsight_search_pages. */
+   async searchPages(
+     query: string,
+-    opts: { limit?: number; timeoutMs?: number } = {}
++    opts: { limit?: number; timeoutMs?: number; onResponse?: ResponseObserver } = {}
+   ): Promise<
+     { id: string; name: string; source_query?: string; snippet: string; score: number }[]
+   > {
+     if (this.pagesSupported === false) throw new PagesUnavailableError();
+     const q = `?q=${encodeURIComponent(query)}&limit=${opts.limit ?? this.pageSearchLimit}`;
+-    const r = await this.pagesReq("GET", `/search${q}`, undefined, [], opts.timeoutMs);
++    const r = await this.pagesReq(
++      "GET",
++      `/search${q}`,
++      undefined,
++      [],
++      opts.timeoutMs,
++      opts.onResponse
++    );
+     // Routed through the same check as every other page endpoint. Without it a server with no
+     // pages API parsed its own 404 body into zero hits and reported "nothing matched"
+     // forever, which reads as an empty bank rather than a missing feature.
+@@ -1052,6 +1146,7 @@
+     try {
+       roots = await this.tree();
+     } catch (e) {
++      throwIfCallerAborted();
+       if (e instanceof PagesUnavailableError) {
+         this.log(`[bank] pages unavailable on ${this.apiUrl}; continuing without them`);
+         return;
+@@ -1250,6 +1345,7 @@
+         const j = (await r?.json()) as { page_id?: string; id?: string } | undefined;
+         pageId = j?.page_id ?? j?.id;
+       } catch {
++        throwIfCallerAborted();
+         /* fall through to the slug fallback below */
+       }
+       pageId ||= `initiative-${this.slugify(args.title)}`; // last resort if the response lacked an id
+@@ -1285,12 +1381,14 @@
+       );
+       if (hit?.id) return hit.id;
+     } catch {
++      throwIfCallerAborted();
+       /* fall through to create */
+     }
+     try {
+       const r = await this.pagesReq("POST", "/folders", { name });
+       return ((await r?.json()) as { id?: string } | undefined)?.id;
+     } catch {
++      throwIfCallerAborted();
+       return undefined;
+     }
+   }
+--- a/hindsight-integrations/coding-agents/src/core/hook.ts
++++ b/hindsight-integrations/coding-agents/src/core/hook.ts
+@@ -29,8 +29,9 @@
+ import { describeError, log, setLogLevel } from "./log";
+ import { startBackgroundSeed } from "./seed";
+ import { stripInjectedMemory } from "./transcript-util";
+-import type { ClientOpts } from "./hindsight";
+-import { HindsightClient, ReflectError } from "./hindsight";
++import type { RecallObservation } from "./runtime-observation";
++import type { ClientOpts, ResponseObserver } from "./hindsight";
++import { HindsightClient, ReflectError, throwIfCallerAborted } from "./hindsight";
+ import { brandWord } from "./brand";
+ import {
+   buildReflectQuery,
+@@ -88,13 +89,19 @@
+ 
+ /** Minimal client shape `buildHookOutput` needs — `HindsightClient` satisfies it structurally. */
+ interface HookClient {
+-  reflect(query: string, opts: { budget?: string; timeoutMs: number }): Promise<string>;
++  reflect(
++    query: string,
++    opts: { budget?: string; timeoutMs: number; onResponse?: ResponseObserver }
++  ): Promise<string>;
+   listPages(): Promise<unknown>;
+   searchPages(
+     query: string,
+-    opts?: { limit?: number; timeoutMs?: number }
++    opts?: { limit?: number; timeoutMs?: number; onResponse?: ResponseObserver }
+   ): Promise<{ id: string; name: string; snippet: string }[]>;
+-  recallObservations(query: string, opts: { timeoutMs: number }): Promise<string[]>;
++  recallObservations(
++    query: string,
++    opts: { timeoutMs: number; onResponse?: ResponseObserver }
++  ): Promise<string[]>;
+   pagesSupported?: boolean;
+   /** Recorded on reflect failures so the diag trail says which bank to look at server-side. */
+   readonly bank?: string;
+@@ -152,16 +159,25 @@
+   client: HookClient,
+   timeoutMs: number,
+   event: string,
+-  lead?: string
++  lead?: string,
++  observation?: RecallObservation
+ ): Promise<string | null | undefined> {
+   const t0 = Date.now();
+   try {
+     // The search query rides in a GET query string; the goal's opening carries its keywords.
+     // How MANY pages come back is the client's `pageSearchLimit`, shared with the MCP tool.
+-    const hits = await client.searchPages(prompt.slice(0, 500), { timeoutMs });
++    const search = (onResponse?: ResponseObserver) =>
++      client.searchPages(prompt.slice(0, 500), {
++        timeoutMs,
++        ...(onResponse ? { onResponse } : {}),
++      });
++    const hits = observation
++      ? await observation.stage("pages", search, (value) => value.length)
++      : await search();
+     diag(harness, event, { ms: Date.now() - t0, count: hits.length });
+     return hits.length ? formatPageFallback(hits, lead) : null;
+   } catch (e) {
++    throwIfCallerAborted();
+     diag(harness, `${event}_failed`, { ms: Date.now() - t0, error: describeError(e) });
+     return undefined;
+   }
+@@ -175,15 +191,24 @@
+   client: HookClient,
+   timeoutMs: number,
+   event: string,
+-  lead?: string
++  lead?: string,
++  observation?: RecallObservation
+ ): Promise<string | null | undefined> {
+   const t0 = Date.now();
+   try {
+     // What is asked for — types, token budget, everything — is the client's `recallOptions`.
+-    const observations = await client.recallObservations(boundRecallQuery(prompt), { timeoutMs });
++    const recall = (onResponse?: ResponseObserver) =>
++      client.recallObservations(boundRecallQuery(prompt), {
++        timeoutMs,
++        ...(onResponse ? { onResponse } : {}),
++      });
++    const observations = observation
++      ? await observation.stage("recall", recall, (value) => value.length)
++      : await recall();
+     diag(harness, event, { ms: Date.now() - t0, count: observations.length });
+     return observations.length ? formatRecallFallback(observations, lead) : null;
+   } catch (e) {
++    throwIfCallerAborted();
+     diag(harness, `${event}_failed`, { ms: Date.now() - t0, error: describeError(e) });
+     return undefined;
+   }
+@@ -200,17 +225,34 @@
+   harness: string,
+   prompt: string,
+   client: HookClient,
+-  timeoutMs: number
++  timeoutMs: number,
++  observation?: RecallObservation
+ ): Promise<string | null | undefined> {
+   // Page search and recall share ONE retrieval budget after reflect fails, rather than each
+   // spending a full injectTimeoutMs and doubling the time added to the host's hook window.
+   const deadline = Date.now() + timeoutMs;
+   const remaining = () => Math.max(deadline - Date.now(), 1);
+   return (
+-    (await injectPages(harness, prompt, client, remaining(), "reflect_fallback_pages")) ??
++    (await injectPages(
++      harness,
++      prompt,
++      client,
++      remaining(),
++      "reflect_fallback_pages",
++      undefined,
++      observation
++    )) ??
+     // Event name predates the `injectRecall` rename and is kept: it is a logged contract that
+     // other tools read, so renaming it would silently break them.
+-    (await injectRecall(harness, prompt, client, remaining(), "reflect_fallback_observations"))
++    (await injectRecall(
++      harness,
++      prompt,
++      client,
++      remaining(),
++      "reflect_fallback_observations",
++      undefined,
++      observation
++    ))
+   );
+ }
+ 
+@@ -224,6 +266,8 @@
+    *  SessionStart preamble from this too, so a turn can no longer be told both "no pages yet" and
+    *  a list of pages in the same context (#4607). Empty also signals a bank the engine never built. */
+   pages: PageRef[];
++  /** True only for this turn's constructed memory body, independent of the page/tool preamble. */
++  bodyPresent: boolean;
+ }
+ 
+ /**
+@@ -241,8 +285,9 @@
+    *  harnesses leave it off: some (Grok) never hand the SessionStart text to the model, so the
+    *  turn-1 refresh is their only copy of the guide. */
+   preambleOnFirstTurn?: boolean;
++  observation?: RecallObservation;
+ }): Promise<HookOutput> {
+-  const { harness, prompt, cfg, client, cacheFile } = args;
++  const { harness, prompt, cfg, client, cacheFile, observation } = args;
+ 
+   const cached = readSessionCache(cacheFile);
+   const turns = (cached.turns ?? 0) + 1;
+@@ -252,8 +297,12 @@
+   // observations. "none" = tool-only mode: the roster's tool guide instead sends new goals through
+   // pages first and reserves reflection for gaps. Whatever the source, its body is
+   // cached as `reflectAnswer` (the field name predates the other sources).
+-  let reflectAnswer = cached.reflectAnswer;
+-  let reflectAttempts = cached.reflectAttempts ?? 0;
++  const refreshInjection =
++    cfg.autoInjectEveryTurns !== undefined &&
++    cfg.autoInjectEveryTurns > 0 &&
++    (turns - 1) % cfg.autoInjectEveryTurns === 0;
++  let reflectAnswer = refreshInjection ? undefined : cached.reflectAnswer;
++  let reflectAttempts = refreshInjection ? 0 : (cached.reflectAttempts ?? 0);
+   let reflectRanThisTurn = false;
+   // Set by whichever source actually FAILED — reflect's catch, or a pages/recall helper returning
+   // undefined. An empty answer is not a failure: a source can legitimately have nothing to say on a
+@@ -262,94 +311,115 @@
+   let reflectFailed = false;
+   // Set when reflect timed out / 5xx'd and a retrieval-only fallback supplied the memory instead.
+   let fallback: string | null | undefined;
+-  const deferInitialReflect = cached.deferInitialReflect === true;
+-  if (deferInitialReflect) {
+-    // A new bank has no useful history yet. Do not burn the once-per-session synthesis on prompt
+-    // one; this marker is deliberately consumed below so prompt two remains eligible to reflect.
+-    diag(harness, "reflect_deferred_new_bank", { query: prompt.slice(0, 80) });
+-  } else if (cfg.autoInject === "pages" && reflectAnswer === undefined) {
+-    reflectRanThisTurn = true;
+-    reflectAttempts++;
+-    const got = await injectPages(
+-      harness,
+-      prompt,
+-      client,
+-      cfg.injectTimeoutMs,
+-      "inject_pages",
+-      PAGE_INJECT_LEAD
+-    );
+-    // `undefined` is the search FAILING, distinct from `null` (it ran, nothing matched). These
+-    // modes stayed silent on a failure while reflect announced one — the same turn looked healthy
+-    // whether memory was unavailable or simply had nothing to say.
+-    if (got === undefined) reflectFailed = true;
+-    reflectAnswer = resolveInjection(got, reflectAttempts);
+-  } else if (cfg.autoInject === "recall" && reflectAnswer === undefined) {
+-    reflectRanThisTurn = true;
+-    reflectAttempts++;
+-    const got = await injectRecall(
+-      harness,
+-      prompt,
+-      client,
+-      cfg.injectTimeoutMs,
+-      "inject_recall",
+-      RECALL_INJECT_LEAD
+-    );
+-    if (got === undefined) reflectFailed = true; // see the pages branch above
+-    reflectAnswer = resolveInjection(got, reflectAttempts);
+-  } else if (cfg.autoInject === "reflect" && reflectAnswer === undefined) {
+-    reflectRanThisTurn = true;
+-    reflectAttempts++;
+-    const t0 = Date.now();
+-    // Previously clamped to a hardcoded 20s, which made a raised reflectTimeoutMs dead config on
+-    // this path (#4398); the 20s now lives in the default instead. Not clamped: a user who raises reflectTimeoutMs past the host's prompt-hook timeout (30s on
+-    // the hook harnesses) must raise that too — see the README's reflectTimeoutMs row.
+-    const timeoutMs = cfg.reflectTimeoutMs;
+-    try {
+-      reflectAnswer = await client.reflect(buildReflectQuery(prompt), {
+-        // Automatic reflection runs inside the host's hook window. Hindsight's low budget is the
+-        // supported default for bounded reflect calls; callers that explicitly invoke the MCP
+-        // tool still get the deeper high-budget path.
+-        budget: "low",
+-        timeoutMs,
+-      });
+-      diag(harness, reflectAnswer ? "reflect_ok" : "reflect_empty", {
+-        ms: Date.now() - t0,
+-        chars: reflectAnswer.length,
+-        query: prompt.slice(0, 80),
+-        // Verbatim injected synthesis — the ONLY durable record of what the agent actually saw
+-        // (post-mortems otherwise depend on the harness happening to persist hook context).
+-        answer: reflectAnswer.slice(0, 8000),
+-      });
+-    } catch (e) {
+-      // A failure is RETRYABLE, not an answer — `resolveInjection` leaves it unresolved until the
+-      // budget is spent. Caching "" here meant one timeout on the session's first prompt disabled
+-      // synthesis for the ENTIRE session, and against a real server a reflect near the timeout is a
+-      // coin flip, not an edge case (#4607).
+-      // ...except a permanent 4xx, which fails identically on every later turn: resolve it now
+-      // rather than spend the session's second attempt on a call that cannot succeed (#5207).
+-      reflectAnswer =
+-        e instanceof ReflectError && e.permanent
+-          ? ""
+-          : resolveInjection(undefined, reflectAttempts);
+-      reflectFailed = true;
+-      log.warn(harness, "reflect failed — session runs without memory", {
+-        error: describeError(e),
+-      });
+-      diag(harness, "reflect_failed", {
+-        ms: Date.now() - t0,
+-        bank: client.bank,
+-        timeoutMs,
+-        // Wider than describeError's default: the server's error body is the useful part.
+-        error: describeError(e, 1500),
+-        query: prompt.slice(0, 80),
+-      });
+-      if (e instanceof ReflectError && e.fallbackEligible) {
+-        fallback = await reflectFallback(harness, prompt, client, cfg.injectTimeoutMs);
+-        // The fallback body is cached exactly like a reflect answer: injected once, not retried.
+-        if (fallback) reflectAnswer = fallback;
++  const deferInitialReflect = !refreshInjection && cached.deferInitialReflect === true;
++  const retrieve = async () => {
++    if (deferInitialReflect) {
++      observation?.skip("deferred_new_bank");
++      // A new bank has no useful history yet. Do not burn the once-per-session synthesis on prompt
++      // one; this marker is deliberately consumed below so prompt two remains eligible to reflect.
++      diag(harness, "reflect_deferred_new_bank", { query: prompt.slice(0, 80) });
++    } else if (cfg.autoInject === "pages" && reflectAnswer === undefined) {
++      reflectRanThisTurn = true;
++      reflectAttempts++;
++      const got = await injectPages(
++        harness,
++        prompt,
++        client,
++        cfg.injectTimeoutMs,
++        "inject_pages",
++        PAGE_INJECT_LEAD,
++        observation
++      );
++      // `undefined` is the search FAILING, distinct from `null` (it ran, nothing matched). These
++      // modes stayed silent on a failure while reflect announced one — the same turn looked healthy
++      // whether memory was unavailable or simply had nothing to say.
++      if (got === undefined) reflectFailed = true;
++      reflectAnswer = resolveInjection(got, reflectAttempts);
++    } else if (cfg.autoInject === "recall" && reflectAnswer === undefined) {
++      reflectRanThisTurn = true;
++      reflectAttempts++;
++      const got = await injectRecall(
++        harness,
++        prompt,
++        client,
++        cfg.injectTimeoutMs,
++        "inject_recall",
++        RECALL_INJECT_LEAD,
++        observation
++      );
++      if (got === undefined) reflectFailed = true; // see the pages branch above
++      reflectAnswer = resolveInjection(got, reflectAttempts);
++    } else if (cfg.autoInject === "reflect" && reflectAnswer === undefined) {
++      reflectRanThisTurn = true;
++      reflectAttempts++;
++      const t0 = Date.now();
++      // Previously clamped to a hardcoded 20s, which made a raised reflectTimeoutMs dead config on
++      // this path (#4398); the 20s now lives in the default instead. Not clamped: a user who raises reflectTimeoutMs past the host's prompt-hook timeout (30s on
++      // the hook harnesses) must raise that too — see the README's reflectTimeoutMs row.
++      const timeoutMs = cfg.reflectTimeoutMs;
++      try {
++        const reflect = (onResponse?: ResponseObserver) =>
++          client.reflect(buildReflectQuery(prompt), {
++            // Automatic reflection runs inside the host's hook window. Hindsight's low budget is the
++            // supported default for bounded reflect calls; callers that explicitly invoke the MCP
++            // tool still get the deeper high-budget path.
++            budget: "low",
++            timeoutMs,
++            ...(onResponse ? { onResponse } : {}),
++          });
++        reflectAnswer = observation
++          ? await observation.stage("reflect", reflect, (value) => value.length)
++          : await reflect();
++        diag(harness, reflectAnswer ? "reflect_ok" : "reflect_empty", {
++          ms: Date.now() - t0,
++          chars: reflectAnswer.length,
++          query: prompt.slice(0, 80),
++          // Verbatim injected synthesis — the ONLY durable record of what the agent actually saw
++          // (post-mortems otherwise depend on the harness happening to persist hook context).
++          answer: reflectAnswer.slice(0, 8000),
++        });
++      } catch (e) {
++        throwIfCallerAborted();
++        // A failure is RETRYABLE, not an answer — `resolveInjection` leaves it unresolved until the
++        // budget is spent. Caching "" here meant one timeout on the session's first prompt disabled
++        // synthesis for the ENTIRE session, and against a real server a reflect near the timeout is a
++        // coin flip, not an edge case (#4607).
++        // ...except a permanent 4xx, which fails identically on every later turn: resolve it now
++        // rather than spend the session's second attempt on a call that cannot succeed (#5207).
++        reflectAnswer =
++          e instanceof ReflectError && e.permanent
++            ? ""
++            : resolveInjection(undefined, reflectAttempts);
++        reflectFailed = true;
++        log.warn(harness, "reflect failed — session runs without memory", {
++          error: describeError(e),
++        });
++        diag(harness, "reflect_failed", {
++          ms: Date.now() - t0,
++          bank: client.bank,
++          timeoutMs,
++          // Wider than describeError's default: the server's error body is the useful part.
++          error: describeError(e, 1500),
++          query: prompt.slice(0, 80),
++        });
++        if (e instanceof ReflectError && e.fallbackEligible) {
++          fallback = await reflectFallback(
++            harness,
++            prompt,
++            client,
++            cfg.injectTimeoutMs,
++            observation
++          );
++          // The fallback body is cached exactly like a reflect answer: injected once, not retried.
++          if (fallback) reflectAnswer = fallback;
++        }
+       }
++    } else {
++      observation?.skip(cfg.autoInject === "none" ? "mode_none" : "cached_decision");
+     }
+-  }
++  };
++  if (observation) await observation.body(retrieve);
++  else await retrieve();
+ 
+   // ── page roster (ids + titles only): refreshed on the cadence ────────
+   const cadence = cfg.pageRefreshEveryTurns;
+@@ -361,6 +431,7 @@
+       pages = parsePageList(await client.listPages());
+       diag(harness, "pages_ok", { ms: Date.now() - t0, count: pages.length });
+     } catch (e) {
++      throwIfCallerAborted();
+       diag(harness, client.pagesSupported === false ? "pages_unavailable" : "pages_failed", {
+         ms: Date.now() - t0,
+         error: describeError(e),
+@@ -423,7 +494,12 @@
+     notice = `${brandWord()} · no memory this turn — see ${diagFilePath()}`;
+   }
+ 
+-  return { context: kept.length ? kept.join("\n\n") : undefined, notice, pages };
++  return {
++    context: kept.length ? kept.join("\n\n") : undefined,
++    notice,
++    pages,
++    bodyPresent: Boolean(reflectAnswer && reflectRanThisTurn),
++  };
+ }
+ 
+ /** Run one hook invocation: stdin event in, (maybe) an injection object on stdout. */
+--- a/hindsight-integrations/coding-agents/src/core/page-tools.ts
++++ b/hindsight-integrations/coding-agents/src/core/page-tools.ts
+@@ -21,7 +21,7 @@
+ import { join } from "node:path";
+ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+ import type { ZodRawShape } from "zod";
+-import type { HindsightClient } from "./hindsight";
++import { throwIfCallerAborted, withCallerSignal, type HindsightClient } from "./hindsight";
+ import { syncStatus } from "./status";
+ import { applyBankConfig, DEFAULT_REFLECT_TOOL_TIMEOUT_MS, loadConfig } from "./config";
+ import { diagFilePath } from "./diag";
+@@ -86,7 +86,7 @@
+    * NON_DESTRUCTIVE_WRITE_ANNOTATIONS so clients still gate them, but for the right reason.
+    */
+   annotations: ToolSafetyAnnotations;
+-  handler: (args: any) => Promise<ToolResult>;
++  handler: (args: any, signal?: AbortSignal) => Promise<ToolResult>;
+ }
+ 
+ function ok(value: unknown): ToolResult {
+@@ -94,6 +94,7 @@
+ }
+ 
+ function err(e: unknown): ToolResult {
++  throwIfCallerAborted();
+   const message = describeError(e);
+   return { content: [{ type: "text", text: JSON.stringify({ error: message }) }], isError: true };
+ }
+@@ -111,8 +112,8 @@
+ 
+ /** Build the page + recall MCP tool specs, bound to one client/bank. */
+ export function buildPageTools(
+-  client: HindsightClient,
+-  bankId: string,
++  client?: HindsightClient,
++  bankId?: string,
+   opts: {
+     repoDir?: string;
+     harness?: string;
+@@ -131,7 +132,7 @@
+ ): ToolSpec[] {
+   const extra = opts.toolGuideExtra?.trim();
+   const crediting = extra ? `${CREDIT_REMINDER} ${extra}` : CREDIT_REMINDER;
+-  return [
++  const specs: ToolSpec[] = [
+     {
+       name: "hindsight_sync_status",
+       description:
+@@ -144,7 +145,7 @@
+       annotations: READ_ONLY_ANNOTATIONS,
+       handler: async () => {
+         try {
+-          return ok(await syncStatus(client, bankId, opts.repoDir ?? process.cwd()));
++          return ok(await syncStatus(client!, bankId!, opts.repoDir ?? process.cwd()));
+         } catch (e) {
+           return err(e);
+         }
+@@ -168,7 +169,7 @@
+         // loadConfig() would report a mismatch for every per-bank credential.
+         const cfg = applyBankConfig(
+           loadConfig({ harness: opts.harness }),
+-          bankId,
++          bankId!,
+           opts.repoDir
+         ).cfg;
+         return ok({
+@@ -187,8 +188,8 @@
+           // this tool reported that state as perfectly healthy (#3600). Booleans only — the token
+           // value is never returned.
+           credential: {
+-            api_token_in_use: Boolean(client.apiToken),
+-            api_token_matches_config: client.apiToken === cfg.apiToken,
++            api_token_in_use: Boolean(client!.apiToken),
++            api_token_matches_config: client!.apiToken === cfg.apiToken,
+           },
+           environment: {
+             config_override: Boolean(process.env.HINDSIGHT_CONFIG),
+@@ -219,7 +220,7 @@
+         try {
+           // Limit comes from the client (`pageSearchLimit`), so the tool and the hook's injection
+           // can never drift apart — this used to pass its own literal 3.
+-          const hits = await client.searchPages(args.query);
++          const hits = await client!.searchPages(args.query);
+           // No `score`. The server fuses BM25 and vector search with reciprocal rank fusion, so the
+           // number is ~1/(60+rank) summed over two retrievers: a perfect top hit scores about 0.03
+           // and nothing ever approaches 1. Handed that, a model reads a strong match as 3% relevant
+@@ -257,7 +258,7 @@
+         "or ask the user. The list changes as work is captured, so re-check it occasionally.",
+       inputSchema: {},
+       annotations: READ_ONLY_ANNOTATIONS,
+-      handler: guarded(async () => client.listPages()),
++      handler: guarded(async () => client!.listPages()),
+     },
+     {
+       name: "hindsight_read_page",
+@@ -270,7 +271,7 @@
+         "that id. Prefer reading a page over re-deriving the same understanding from source.",
+       inputSchema: { page_id: z.string() },
+       annotations: READ_ONLY_ANNOTATIONS,
+-      handler: guarded(async ({ page_id }) => client.getPage(page_id)),
++      handler: guarded(async ({ page_id }) => client!.getPage(page_id)),
+     },
+     {
+       name: "hindsight_reflect",
+@@ -284,7 +285,7 @@
+       inputSchema: { query: z.string().describe("the question to reason over memory about") },
+       annotations: READ_ONLY_ANNOTATIONS,
+       handler: guarded(async ({ query }: { query: string }) =>
+-        client.reflect(query, {
++        client!.reflect(query, {
+           budget: opts.reflectBudget ?? "high",
+           timeoutMs: opts.reflectTimeoutMs ?? DEFAULT_REFLECT_TOOL_TIMEOUT_MS,
+         })
+@@ -321,7 +322,7 @@
+       },
+       annotations: NON_DESTRUCTIVE_WRITE_ANNOTATIONS,
+       handler: guarded(async ({ title, summary, relates_to_page_id }) =>
+-        client.captureInitiative({
++        client!.captureInitiative({
+           title,
+           summary,
+           relatesToPageId: relates_to_page_id,
+@@ -359,7 +360,7 @@
+           ...stamp?.metadata,
+           ...(opts.harness ? { harness: opts.harness } : {}),
+         };
+-        await client.retain(
++        await client!.retain(
+           content,
+           "ingested document",
+           docId,
+@@ -377,4 +378,8 @@
+       }),
+     },
+   ];
+-}
++  return specs.map((spec) => {
++    const handler = spec.handler;
++    return { ...spec, handler: (args, signal) => withCallerSignal(signal, () => handler(args)) };
++  });
++}
+--- /dev/null
++++ b/hindsight-integrations/coding-agents/src/core/runtime-observation.ts
+@@ -0,0 +1,228 @@
++import { version } from "../../package.json";
++import type { AutoInject } from "./config";
++import {
++  HttpResponseError,
++  PagesUnavailableError,
++  RateLimitedError,
++  ReflectError,
++  type ResponseObserver,
++} from "./hindsight";
++
++export const OBSERVATION_PROTOCOL = 1;
++export const RUNTIME_SERVICE = "hindsightRuntime";
++export const OBSERVATION_EVENT = "hindsight/observation";
++
++/** This describes the executing module, independently of the on-disk installation declaration. */
++export function describeRuntime() {
++  return {
++    upstreamVersion: version,
++    patchSetVersion: "2",
++    capabilities: {
++      autoInjectEveryTurns: true,
++      runtimeInspection: true,
++      recallSummary: true,
++      injectionCorrelation: true,
++    },
++  };
++}
++
++export interface EffectiveMemory {
++  workspaceRoot: string;
++  bankId: string;
++  apiUrl: string;
++  autoInject: AutoInject;
++  autoInjectEveryTurns: number | null;
++  retainSessions: boolean;
++  injectTimeoutMs: number;
++  recallOptions: { types: unknown; budget: unknown; max_tokens: unknown };
++}
++
++export interface RuntimeInspection {
++  protocolVersion: 1;
++  sessionId: string | null;
++  status:
++    | "session_not_active"
++    | "excluded_subagent"
++    | "workspace_uninitialized"
++    | "disabled"
++    | "ready";
++  hooksDisabled: boolean;
++  runtime: ReturnType<typeof describeRuntime>;
++  effective: EffectiveMemory | null;
++}
++
++type RetrievalMode = Exclude<AutoInject, "none">;
++export type RecallSkipReason =
++  | "mode_none"
++  | "deferred_new_bank"
++  | "cached_decision"
++  | "hooks_disabled"
++  | "workspace_disabled"
++  | "excluded_subagent"
++  | "no_user_text";
++export interface RecallStage {
++  mode: RetrievalMode;
++  status: "completed" | "empty" | "not_found" | "unavailable" | "failed" | "cancelled";
++  durationMs: number;
++  httpStatus: number | null;
++  errorKind: string | null;
++  result: { unit: "memories" | "pages" | "characters"; count: number } | null;
++}
++
++export interface RecallRecord {
++  protocolVersion: 1;
++  turn: null;
++  ownerTurn: number;
++  recallId: string;
++  inspection: RuntimeInspection;
++  requestedMode: AutoInject | null;
++  status: "running" | "completed" | "empty" | "failed" | "cancelled" | "skipped";
++  interruption: { phase: "preparation"; kind: "cancelled" | "failed" } | null;
++  degraded: boolean;
++  skipReason: RecallSkipReason | null;
++  totalDurationMs: number | null;
++  stages: RecallStage[];
++  bodyPresent: boolean | null;
++}
++
++export interface QueryScope {
++  sessionId: string;
++  ownerTurn: number;
++  recallId: string;
++}
++
++/** One collector per prompt. Only the adapter emits events; the shared core updates this value. */
++export class RecallObservation {
++  readonly record: RecallRecord;
++  private startedAt: number | null = null;
++  private bodyFinished = false;
++
++  constructor(
++    inspection: RuntimeInspection,
++    readonly scope: QueryScope,
++    private readonly signal: AbortSignal,
++    private readonly scoped: (callback: () => Promise<void>) => Promise<void>
++  ) {
++    this.record = {
++      protocolVersion: OBSERVATION_PROTOCOL,
++      turn: null,
++      ownerTurn: scope.ownerTurn,
++      recallId: scope.recallId,
++      inspection,
++      requestedMode: inspection.effective?.autoInject ?? null,
++      status: "running",
++      interruption: null,
++      degraded: false,
++      skipReason: null,
++      totalDurationMs: null,
++      stages: [],
++      bodyPresent: null,
++    };
++  }
++
++  skip(reason: RecallSkipReason): void {
++    this.record.status = "skipped";
++    this.record.skipReason = reason;
++  }
++
++  /** The scope ends before roster fetching; its result must survive later preparation failures. */
++  async body(callback: () => Promise<void>): Promise<void> {
++    try {
++      await this.scoped(callback);
++      this.bodyFinished = true;
++    } finally {
++      if (this.startedAt !== null) {
++        this.record.totalDurationMs = performance.now() - this.startedAt;
++        const stages = this.record.stages;
++        this.record.status = stages.some((s) => s.status === "cancelled")
++          ? "cancelled"
++          : stages.some((s) => s.status === "completed")
++            ? "completed"
++            : stages.some((s) => s.status !== "empty")
++              ? "failed"
++              : "empty";
++        this.record.degraded =
++          this.record.status === "completed" && stages.some((s) => s.status === "failed");
++      }
++    }
++  }
++
++  async stage<T>(
++    mode: RetrievalMode,
++    call: (onResponse?: ResponseObserver) => Promise<T>,
++    count: (value: T) => number
++  ): Promise<T> {
++    const start = performance.now();
++    this.startedAt ??= start;
++    let httpStatus: number | null = null;
++    const stage: RecallStage = {
++      mode,
++      status: "failed",
++      durationMs: 0,
++      httpStatus: null,
++      errorKind: null,
++      result: null,
++    };
++    try {
++      const value = await call((response) => {
++        httpStatus = response.status;
++      });
++      this.signal.throwIfAborted();
++      stage.httpStatus = httpStatus;
++      if (httpStatus === 404) {
++        stage.status = "not_found";
++        stage.errorKind = "http";
++      } else {
++        const amount = count(value);
++        stage.status = amount > 0 ? "completed" : "empty";
++        stage.result = {
++          unit: mode === "recall" ? "memories" : mode === "pages" ? "pages" : "characters",
++          count: amount,
++        };
++      }
++      return value;
++    } catch (error) {
++      // A prior response can precede a replay transport failure or body timeout. Only an error
++      // whose type proves a terminal HTTP response may reuse its status.
++      if (this.signal.aborted) {
++        stage.status = "cancelled";
++        stage.errorKind = "cancelled";
++      } else if (error instanceof PagesUnavailableError) {
++        stage.status = "unavailable";
++        stage.httpStatus = httpStatus;
++        stage.errorKind = "pages_unavailable";
++      } else if (error instanceof RateLimitedError) {
++        stage.httpStatus = 429;
++        stage.errorKind = "rate_limited";
++      } else if (error instanceof HttpResponseError || error instanceof ReflectError) {
++        stage.httpStatus = error.status ?? null;
++        stage.errorKind = error instanceof ReflectError && error.timedOut ? "timeout" : "http";
++      } else if (error instanceof Error) {
++        // TypeError may come from fetch, a broken response body, or parsed data with an
++        // unexpected shape. Its name alone cannot distinguish network from response failures.
++        stage.errorKind =
++          error.name === "TimeoutError" || error.name === "AbortError"
++            ? "timeout"
++            : error instanceof SyntaxError
++              ? "invalid_response"
++              : error.name;
++      } else {
++        stage.errorKind = "unknown";
++      }
++      throw error;
++    } finally {
++      stage.durationMs = performance.now() - start;
++      this.record.stages.push(stage);
++    }
++  }
++
++  interrupted(): void {
++    const kind = this.signal.aborted ? "cancelled" : "failed";
++    if (this.bodyFinished) this.record.interruption = { phase: "preparation", kind };
++    else this.record.status = kind;
++  }
++
++  snapshot(): RecallRecord {
++    return structuredClone(this.record);
++  }
++}
+--- a/hindsight-integrations/coding-agents/src/core/runtime.test.ts
++++ b/hindsight-integrations/coding-agents/src/core/runtime.test.ts
+@@ -225,6 +225,29 @@
+     await runtime.onSessionIdle("s3");
+     await new Promise((r) => setTimeout(r, 0));
+     expect(retained).toHaveLength(1);
++  });
++
++  it("retries failed submissions and serializes duplicate stops without advancing the accepted snapshot", async () => {
++    const { client, retained } = makeClient();
++    vi.mocked(client.retain).mockRejectedValueOnce(new Error("unavailable"));
++    const runtime = new RuntimeCore(client, "bank-1", resolveConfig({}));
++    const transcript = [turn("user", "hi"), turn("assistant", "hello")];
++    runtime.setTranscriptSource(async () => transcript);
++    await runtime.onSessionIdle("failed-then-retried");
++    await runtime.flush();
++    expect(client.retain).toHaveBeenCalledTimes(1);
++    expect(retained).toHaveLength(0);
++    await Promise.all([
++      runtime.onSessionIdle("failed-then-retried"),
++      runtime.onSessionIdle("failed-then-retried"),
++    ]);
++    await runtime.flush();
++    expect(client.retain).toHaveBeenCalledTimes(2);
++    expect(retained).toHaveLength(1);
++    runtime.setTranscriptSource(async () => transcript.slice(0, 1));
++    await runtime.onSessionIdle("failed-then-retried");
++    await runtime.flush();
++    expect(client.retain).toHaveBeenCalledTimes(2);
+   });
+ 
+   it("records Hindsight usage for a turn only once its reply is in", async () => {
+--- a/hindsight-integrations/coding-agents/src/core/runtime.ts
++++ b/hindsight-integrations/coding-agents/src/core/runtime.ts
+@@ -16,12 +16,13 @@
+  *   - flush()                       : host is exiting -> wait (bounded) for in-flight write-backs
+  * No opencode/claude specifics live here — only the memory logic.
+  */
++import type { EffectiveMemory, RecallObservation } from "./runtime-observation";
+ import type { Config } from "./config";
+ import { maybeAutoUpdate } from "./auto-update";
+ import { DAEMON_WAIT_RETAIN_MS, DAEMON_WAIT_SESSION_START_MS, ensureDaemon } from "./daemon";
+ import { diag } from "./diag";
+ import { describeError, log, setLogLevel } from "./log";
+-import type { HindsightClient } from "./hindsight";
++import { withCallerSignal, type HindsightClient } from "./hindsight";
+ import { buildPagesPreamble } from "./page-injection";
+ import { buildPageTools, type ToolSpec } from "./page-tools";
+ import { buildPageTrigger } from "./missions";
+@@ -42,7 +43,10 @@
+ export class RuntimeCore {
+   private readonly injection = new Map<string, string>(); // sessionId -> this turn's injection block
+   private readonly turnCount = new Map<string, number>(); // sessionId -> user-turn counter (cadence)
+-  private readonly sessionState = new Map<string, { startTs: string; retainedTurns: number }>();
++  private readonly sessionState = new Map<
++    string,
++    { startTs: string; retainedTurns: number; writeBack: Promise<void> }
++  >();
+   /** Live write-back cursors. In memory, unlike the hook harnesses': this host outlives the session. */
+   private readonly cursors = memoryCursorStore();
+   /** Turns already written to the usage log (core/usage.ts), per session. */
+@@ -101,6 +105,24 @@
+           bankId: this.bankId,
+         }),
+     });
++  }
++
++  /** Reads the cached instance only. Inspecting must never re-resolve configuration or create clients. */
++  inspectEffective(): EffectiveMemory {
++    return {
++      workspaceRoot: this.projectDir,
++      bankId: this.bankId,
++      apiUrl: this.client.apiUrl,
++      autoInject: this.cfg.autoInject,
++      autoInjectEveryTurns: this.cfg.autoInjectEveryTurns ?? null,
++      retainSessions: this.cfg.retainSessions,
++      injectTimeoutMs: this.cfg.injectTimeoutMs,
++      recallOptions: {
++        types: this.client.recallOptions.types ?? null,
++        budget: this.client.recallOptions.budget ?? null,
++        max_tokens: this.client.recallOptions.max_tokens ?? null,
++      },
++    };
+   }
+ 
+   get writeBackEnabled(): boolean {
+@@ -165,8 +187,17 @@
+    * intentionally replaces the old in-memory reflect/page state, keeping lifecycle behavior
+    * identical across hosts while this adapter retains only delivery-specific state.
+    */
+-  async onPrompt(sessionId: string | undefined, rawPrompt: string): Promise<void> {
+-    if (process.env.HINDSIGHT_DISABLE_HOOKS) return; // anti-recursion (see seedIfCold)
++  async onPrompt(
++    sessionId: string | undefined,
++    rawPrompt: string,
++    signal?: AbortSignal,
++    observation?: RecallObservation
++  ): Promise<void> {
++    signal?.throwIfAborted();
++    if (process.env.HINDSIGHT_DISABLE_HOOKS) {
++      observation?.skip("hooks_disabled");
++      return;
++    }
+     if (!sessionId) return;
+     // Same cleaning as the hook harnesses' runHook: a host's tagged block ahead of the user's
+     // words would otherwise become the reflect goal and the length-capped recall query (#6488).
+@@ -174,11 +205,12 @@
+     // No prompt text means no recall, so no block for this turn either: the previous turn's block
+     // must not be handed out again, since every host now persists it into the user message.
+     if (!prompt) {
++      observation?.skip("no_user_text");
++      if (observation) observation.record.bodyPresent = false;
+       this.injection.delete(sessionId);
+       return;
+     }
+     const turns = (this.turnCount.get(sessionId) ?? 0) + 1;
+-    this.turnCount.set(sessionId, turns);
+ 
+     const cacheFile = sessionCacheFile(this.harness, sessionId);
+     if (this.deferInitialReflect) {
+@@ -187,14 +219,17 @@
+       this.deferInitialReflect = false;
+       writeSessionCache(cacheFile, { deferInitialReflect: true });
+     }
+-    const output = await buildHookOutput({
+-      harness: this.harness,
+-      prompt,
+-      cfg: this.cfg,
+-      client: this.client,
+-      cacheFile,
+-      preambleOnFirstTurn: true,
+-    });
++    const output = await withCallerSignal(signal, () =>
++      buildHookOutput({
++        harness: this.harness,
++        prompt,
++        cfg: this.cfg,
++        client: this.client,
++        cacheFile,
++        preambleOnFirstTurn: true,
++        observation,
++      })
++    );
+ 
+     const blocks: string[] = [];
+     // The SessionStart-equivalent preamble, injected once on the first turn (later turns get the
+@@ -224,7 +259,9 @@
+       this.notify?.("Hindsight · recalled past decisions", preview);
+     }
+     const block = blocks.filter(Boolean).join("\n\n");
++    this.turnCount.set(sessionId, turns);
+     this.injection.set(sessionId, block);
++    if (observation) observation.record.bodyPresent = output.bodyPresent;
+   }
+ 
+   /**
+@@ -304,7 +341,6 @@
+     // idle can fire more than once for one exchange (and again on a session with no new activity);
+     // only retain when this transcript actually grew past what we last wrote.
+     if (turns.length <= st.retainedTurns) return;
+-    st.retainedTurns = turns.length;
+     this.retain(sessionId, turns, st.startTs, "idle");
+   }
+ 
+@@ -326,10 +362,11 @@
+   private stateFor(sessionId: string): {
+     startTs: string;
+     retainedTurns: number;
++    writeBack: Promise<void>;
+   } {
+     let st = this.sessionState.get(sessionId);
+     if (!st) {
+-      st = { startTs: new Date().toISOString(), retainedTurns: 0 };
++      st = { startTs: new Date().toISOString(), retainedTurns: 0, writeBack: Promise.resolve() };
+       this.sessionState.set(sessionId, st);
+     }
+     return st;
+@@ -367,9 +404,13 @@
+     // unlike the Stop hook it costs the host nothing: this call already returns before the retain
+     // does. Deliberately not gated on the result — retain proceeds either way, so an unreachable
+     // daemon produces the same `retain_failed` diagnostic as an unreachable Cloud server.
+-    const write = ensureDaemon(this.cfg, this.harness, { waitMs: DAEMON_WAIT_RETAIN_MS })
+-      .then(() =>
+-        retainLiveSession(this.client, sessionId, turns, startTs, this.harness, {
++    const st = this.stateFor(sessionId);
++    const write = st.writeBack
++      .then(async () => {
++        // Earlier stops may already have accepted this snapshot while it waited in the queue.
++        if (trigger === "idle" && turns.length <= st.retainedTurns) return;
++        await ensureDaemon(this.cfg, this.harness, { waitMs: DAEMON_WAIT_RETAIN_MS });
++        await retainLiveSession(this.client, sessionId, turns, startTs, this.harness, {
+           cursors: this.cursors,
+           stamp: buildRetainStamp(this.cfg, {
+             directory: this.projectDir,
+@@ -377,16 +418,15 @@
+             bankId: this.bankId,
+             sessionId,
+           }),
+-        })
+-      )
+-      .then(() =>
++        });
++        if (trigger === "idle") st.retainedTurns = Math.max(st.retainedTurns, turns.length);
+         diag(this.harness, "retain_ok", {
+           ms: Date.now() - t0,
+           turns: turns.length,
+           session: sessionId,
+           trigger,
+-        })
+-      )
++        });
++      })
+       .catch((e) =>
+         diag(this.harness, "retain_failed", {
+           ms: Date.now() - t0,
+@@ -395,6 +435,7 @@
+           trigger,
+         })
+       );
++    st.writeBack = write;
+     this.inFlight.add(write);
+     void write.finally(() => this.inFlight.delete(write));
+   }
+--- a/hindsight-integrations/coding-agents/src/core/status.ts
++++ b/hindsight-integrations/coding-agents/src/core/status.ts
+@@ -57,20 +57,32 @@
+   }
+ }
+ 
++import { throwIfCallerAborted } from "./hindsight";
++
+ export async function syncStatus(
+   client: StatusClient,
+   bank: string,
+   repoDir?: string
+ ): Promise<SyncStatus> {
+   const gitIds = await client.listDocumentIds("source:git", "all_strict");
+-  const chatIds = await client
+-    .listDocumentIds("source:chat", "all_strict")
+-    .catch(() => new Set<string>());
+-  const pages = parsePageList(await client.listPages().catch(() => null));
+-  const activeOps = await client.activeOperations().catch(() => null);
+-  const uploads = await client
+-    .listDocumentIds("source:upload", "all_strict")
+-    .catch(() => new Set<string>());
++  const chatIds = await client.listDocumentIds("source:chat", "all_strict").catch(() => {
++    throwIfCallerAborted();
++    return new Set<string>();
++  });
++  const pages = parsePageList(
++    await client.listPages().catch(() => {
++      throwIfCallerAborted();
++      return null;
++    })
++  );
++  const activeOps = await client.activeOperations().catch(() => {
++    throwIfCallerAborted();
++    return null;
++  });
++  const uploads = await client.listDocumentIds("source:upload", "all_strict").catch(() => {
++    throwIfCallerAborted();
++    return new Set<string>();
++  });
+   const surveyDocs = SURVEY_DOC_IDS.filter((id) => uploads.has(id)).length;
+ 
+   // Survey observability: the survey-baseline:<sha> markers Chris's re-survey mechanism writes.
+@@ -91,6 +103,7 @@
+         surveyCommitsBehind = best.behind;
+       }
+     } catch {
++      throwIfCallerAborted();
+       /* fail open — survey state is informational */
+     }
+   }
+--- /dev/null
++++ b/hindsight-integrations/coding-agents/src/dsh-observation.test.ts
+@@ -0,0 +1,511 @@
++import { randomUUID } from "node:crypto";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { createDshRuntime } from "./dsh";
++import { resolveConfig, type Config } from "./core/config";
++import { HindsightClient, HttpResponseError } from "./core/hindsight";
++import { resolveHostMemory } from "./core/host-client";
++import { RuntimeCore } from "./core/runtime";
++import { sessionCacheFile, writeSessionCache } from "./core/session-cache";
++import type { RecallRecord } from "./core/runtime-observation";
++
++vi.mock("./core/host-client", () => ({ resolveHostMemory: vi.fn() }));
++
++const configs = new Map<string, Config>();
++const records: RecallRecord[] = [];
++let runtime: ReturnType<typeof createDshRuntime>;
++let config: Config;
++
++function agent(root = "/workspace-a") {
++  return { session: { header: { id: randomUUID(), cwd: root }, snapshotEvents: () => [] } };
++}
++function enter(text: string) {
++  return async () => ({
++    kind: "enter" as const,
++    decisionExtra: "preserved",
++    messages: [
++      { role: "user" as const, content: [{ type: "text", text }], source: { kind: "user" } },
++    ],
++  });
++}
++function step(
++  a = agent(),
++  text = "remember the build decision",
++  turn = 1,
++  signal = new AbortController().signal
++) {
++  return runtime.hooks.preStep({ agent: a, signal, turn, step: 0 }, enter(text));
++}
++function response(body: unknown, status = 200) {
++  return new Response(JSON.stringify(body), {
++    status,
++    headers: { "content-type": "application/json" },
++  });
++}
++function serve(retrieval: (url: string, init: RequestInit) => Response | Promise<Response>) {
++  const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
++    const url = String(input);
++    return url.endsWith("/pages/tree") ? response({ roots: [] }) : retrieval(url, init!);
++  });
++  vi.stubGlobal("fetch", fetch);
++  return fetch;
++}
++
++beforeEach(() => {
++  records.length = 0;
++  configs.clear();
++  config = resolveConfig({
++    apiUrl: "http://memory.internal",
++    bankId: "bank-a",
++    autoInject: "recall",
++    autoInjectEveryTurns: 1,
++    retainSessions: false,
++    autoUpdate: false,
++    autoSeed: false,
++    codebaseSurvey: false,
++    gitIngest: "none",
++  });
++  vi.spyOn(RuntimeCore.prototype, "seedIfCold").mockResolvedValue();
++  vi.mocked(resolveHostMemory).mockImplementation((_harness, root) => {
++    const cfg = configs.get(root) ?? config;
++    return {
++      cfg,
++      bankId: cfg.bankId!,
++      client: new HindsightClient({
++        apiUrl: cfg.apiUrl,
++        bank: cfg.bankId!,
++        recallOptions: cfg.recallOptions,
++      }),
++    };
++  });
++  runtime = createDshRuntime(({ record }) => records.push(record));
++});
++
++afterEach(async () => {
++  await runtime.dispose();
++  vi.restoreAllMocks();
++  vi.unstubAllGlobals();
++  vi.unstubAllEnvs();
++});
++
++describe("DSH runtime inspection", () => {
++  it("reads loaded capabilities without initializing cold sessions, workspaces or subagents", () => {
++    const a = agent();
++    const fetch = serve(() => response({ results: [] }));
++    expect(runtime.inspect()).toMatchObject({
++      status: "session_not_active",
++      sessionId: null,
++      effective: null,
++    });
++    expect(runtime.inspect(a)).toMatchObject({
++      status: "workspace_uninitialized",
++      effective: null,
++    });
++    expect(
++      runtime.inspect({
++        session: { ...a.session, header: { ...a.session.header, origin: "subagent" } },
++      }).status
++    ).toBe("excluded_subagent");
++    expect(runtime.inspect().runtime.capabilities.runtimeInspection).toBe(true);
++    expect(resolveHostMemory).not.toHaveBeenCalled();
++    expect(fetch).not.toHaveBeenCalled();
++  });
++
++  it("reports actual workspace caches after configuration changes and returns detached data", () => {
++    const a = agent();
++    runtime.workspaceFor(a.session.header.cwd);
++    const first = runtime.inspect(a);
++    first.effective!.recallOptions.types = ["changed-by-reader"];
++    config = resolveConfig({
++      ...config,
++      bankId: "bank-new",
++      apiUrl: "http://new.internal",
++      autoInject: "pages",
++    });
++    expect(runtime.inspect(agent()).effective).toMatchObject({
++      bankId: "bank-a",
++      apiUrl: "http://memory.internal",
++      autoInject: "recall",
++    });
++    expect(runtime.inspect(a).effective!.recallOptions.types).not.toEqual(["changed-by-reader"]);
++    const b = agent("/workspace-b");
++    runtime.workspaceFor(b.session.header.cwd);
++    expect(runtime.inspect(b).effective).toMatchObject({
++      bankId: "bank-new",
++      apiUrl: "http://new.internal",
++    });
++    expect(resolveHostMemory).toHaveBeenCalledTimes(2);
++  });
++
++  it("reports disabled workspaces and the existing hooks switch without claiming active retrieval", async () => {
++    configs.set("/disabled", resolveConfig({ ...config, disabled: true }));
++    const disabled = agent("/disabled");
++    await step(disabled);
++    expect(runtime.inspect(disabled).status).toBe("disabled");
++    expect(records.at(-1)).toMatchObject({
++      status: "skipped",
++      skipReason: "workspace_disabled",
++      requestedMode: null,
++    });
++    vi.stubEnv("HINDSIGHT_DISABLE_HOOKS", "1");
++    const a = agent();
++    await step(a);
++    expect(records.at(-1)).toMatchObject({
++      status: "skipped",
++      skipReason: "hooks_disabled",
++      inspection: { hooksDisabled: true, effective: { autoInject: "recall" } },
++    });
++  });
++});
++
++describe("DSH structured retrieval", () => {
++  it("counts usable memory texts and correlates distinct prompts in the same turn", async () => {
++    const scopes: unknown[] = [];
++    vi.stubGlobal(
++      "fetch",
++      vi.fn(async (input: string) => {
++        scopes.push(runtime.queryScope());
++        return input.endsWith("/pages/tree")
++          ? response({ roots: [] })
++          : response({ results: [{ text: "one" }, { text: " " }, {}, { text: "two" }] });
++      })
++    );
++    const a = agent();
++    const decision = await step(a);
++    expect(records.at(-1)).toMatchObject({
++      status: "completed",
++      bodyPresent: true,
++      stages: [
++        {
++          mode: "recall",
++          status: "completed",
++          httpStatus: 200,
++          result: { unit: "memories", count: 2 },
++        },
++      ],
++    });
++    expect(scopes[0]).toMatchObject({
++      sessionId: a.session.header.id,
++      ownerTurn: 1,
++      recallId: records.at(-1)!.recallId,
++    });
++    expect(scopes[1]).toBeUndefined();
++    expect(decision).toMatchObject({ decisionExtra: "preserved" });
++    if (decision.kind !== "enter") throw new Error("expected enter");
++    expect(decision.messages.at(-1)!.source.hindsight).toEqual({
++      protocolVersion: 1,
++      ownerTurn: 1,
++      recallId: records.at(-1)!.recallId,
++      bodyPresent: true,
++    });
++    const firstId = records.at(-1)!.recallId;
++    await step(a, "additional user instruction", 1);
++    expect(records.at(-1)!.recallId).not.toBe(firstId);
++    expect(records.at(-1)!.ownerTurn).toBe(1);
++    const count = records.length;
++    await runtime.hooks.preStep(
++      { agent: a, signal: new AbortController().signal, turn: 1 },
++      async () => ({ kind: "enter", messages: [] })
++    );
++    expect(records).toHaveLength(count);
++  });
++
++  it.each([
++    { status: 200, body: { results: [] }, overall: "empty", stage: "empty", count: 0 },
++    {
++      status: 404,
++      body: { detail: "bank not found" },
++      overall: "failed",
++      stage: "not_found",
++      count: null,
++    },
++    {
++      status: 503,
++      body: { detail: "unavailable" },
++      overall: "failed",
++      stage: "failed",
++      count: null,
++    },
++  ])(
++    "distinguishes HTTP $status from an empty successful response",
++    async ({ status, body, overall, stage, count }) => {
++      serve(() => response(body, status));
++      await step();
++      const final = records.at(-1)!;
++      expect(final).toMatchObject({
++        status: overall,
++        bodyPresent: false,
++        stages: [{ status: stage, httpStatus: status }],
++      });
++      expect(final.stages[0].result).toEqual(count === null ? null : { unit: "memories", count });
++      expect(final.totalDurationMs).toBeGreaterThanOrEqual(final.stages[0].durationMs);
++    }
++  );
++
++  it("records reflect degradation through empty pages to successful recall", async () => {
++    config = resolveConfig({ ...config, autoInject: "reflect" });
++    serve((url) =>
++      url.endsWith("/reflect")
++        ? response({ detail: "synthesis unavailable" }, 503)
++        : url.includes("/pages/search")
++          ? response({ results: [] })
++          : response({ results: [{ text: "recovered fact" }] })
++    );
++    await step();
++    expect(records.at(-1)).toMatchObject({
++      status: "completed",
++      degraded: true,
++      bodyPresent: true,
++      stages: [
++        { mode: "reflect", status: "failed", httpStatus: 503 },
++        { mode: "pages", status: "empty", result: { unit: "pages", count: 0 } },
++        { mode: "recall", status: "completed", result: { unit: "memories", count: 1 } },
++      ],
++    });
++  });
++
++  it("counts reflect characters without inventing memory hits", async () => {
++    config = resolveConfig({ ...config, autoInject: "reflect" });
++    serve(() => response({ text: "没有相关信息" }));
++    await step();
++    expect(records.at(-1)!.stages[0].result).toEqual({ unit: "characters", count: 6 });
++  });
++
++  it("keeps legacy page compatibility inside a single stage and recognizes unavailable APIs", async () => {
++    config = resolveConfig({ ...config, autoInject: "pages" });
++    serve((url) =>
++      url.includes("/knowledge-base/")
++        ? response({ results: [{ id: "p", name: "Plan", snippet: "why" }] })
++        : response({ detail: "Not Found" }, 404)
++    );
++    await step();
++    expect(records.at(-1)!.stages).toMatchObject([
++      { mode: "pages", status: "completed", httpStatus: 200, result: { unit: "pages", count: 1 } },
++    ]);
++    serve(() => response({ detail: "Not Found" }, 404));
++    await step(agent("/another-workspace"));
++    expect(records.at(-1)!.stages).toMatchObject([
++      { status: "unavailable", httpStatus: 404, errorKind: "pages_unavailable" },
++    ]);
++  });
++
++  it("reports actual skip branches and retries empty results before the next cadence is due", async () => {
++    config = resolveConfig({ ...config, autoInjectEveryTurns: 3 });
++    const fetch = serve(() => response({ results: [] }));
++    const a = agent();
++    await step(a);
++    await step(a, "second", 2);
++    expect(records.at(-1)!.status).toBe("empty");
++    expect(
++      fetch.mock.calls.filter(([url]) => String(url).endsWith("/memories/recall"))
++    ).toHaveLength(2);
++    serve(() => response({ results: [{ text: "fact" }] }));
++    await step(a, "third", 3);
++    await step(a, "fourth", 4);
++    await step(a, "fifth", 5);
++    expect(records.at(-1)).toMatchObject({
++      status: "skipped",
++      skipReason: "cached_decision",
++      totalDurationMs: null,
++      bodyPresent: false,
++    });
++    config = resolveConfig({ ...config, autoInject: "none" });
++    await step(agent("/none"));
++    expect(records.at(-1)).toMatchObject({
++      status: "skipped",
++      skipReason: "mode_none",
++      bodyPresent: false,
++    });
++    config = resolveConfig({ ...config, autoInject: "recall", autoInjectEveryTurns: 0 });
++    const deferred = agent("/deferred");
++    writeSessionCache(sessionCacheFile("dsh", deferred.session.header.id), {
++      deferInitialReflect: true,
++    });
++    await step(deferred);
++    expect(records.at(-1)).toMatchObject({ status: "skipped", skipReason: "deferred_new_bank" });
++    await step(agent(), "<hindsight_memory>old context</hindsight_memory>");
++    expect(records.at(-1)).toMatchObject({ status: "skipped", skipReason: "no_user_text" });
++  });
++
++  it("preserves caller cancellation in retrieval and keeps a finished retrieval when preparation is cancelled", async () => {
++    const controller = new AbortController();
++    const reason = new Error("stop retrieval");
++    serve(() => {
++      controller.abort(reason);
++      throw reason;
++    });
++    await expect(step(agent(), "cancel", 1, controller.signal)).rejects.toBe(reason);
++    expect(records.at(-1)).toMatchObject({
++      status: "cancelled",
++      interruption: null,
++      bodyPresent: null,
++      stages: [{ status: "cancelled", httpStatus: null }],
++    });
++    const preparation = new AbortController();
++    vi.stubGlobal(
++      "fetch",
++      vi.fn(async (url: string) => {
++        if (url.endsWith("/pages/tree")) {
++          preparation.abort(reason);
++          throw reason;
++        }
++        return response({ results: [{ text: "retrieved" }] });
++      })
++    );
++    await expect(step(agent(), "prepare", 1, preparation.signal)).rejects.toBe(reason);
++    expect(records.at(-1)).toMatchObject({
++      status: "completed",
++      interruption: { phase: "preparation", kind: "cancelled" },
++      bodyPresent: null,
++      stages: [{ status: "completed" }],
++    });
++  });
++
++  it("attributes the final authentication replay and clears earlier HTTP status on transport failure", async () => {
++    vi.mocked(resolveHostMemory).mockImplementation((_harness, _root) => ({
++      cfg: config,
++      bankId: "bank-a",
++      client: new HindsightClient({
++        apiUrl: config.apiUrl,
++        bank: "bank-a",
++        apiToken: "old",
++        tokenProvider: () => "new",
++      }),
++    }));
++    let attempts = 0;
++    serve(() =>
++      ++attempts === 1 ? response({}, 401) : response({ results: [{ text: "retried" }] })
++    );
++    await step();
++    expect(records.at(-1)!.stages).toMatchObject([{ status: "completed", httpStatus: 200 }]);
++    expect(attempts).toBe(2);
++    attempts = 0;
++    serve(() => {
++      if (++attempts === 1) return response({}, 401);
++      throw new TypeError("fetch failed");
++    });
++    await step(agent("/new-auth-workspace"));
++    expect(records.at(-1)!.stages).toMatchObject([
++      { status: "failed", httpStatus: null, errorKind: "TypeError" },
++    ]);
++  });
++
++  it.each([
++    { mode: "recall" as const, body: { results: [{ text: 42 }] } },
++    { mode: "reflect" as const, body: { text: 42 } },
++    { mode: "pages" as const, body: { results: {} } },
++  ])(
++    "does not mislabel a malformed $mode response as a network failure",
++    async ({ mode, body }) => {
++      config = resolveConfig({ ...config, autoInject: mode });
++      serve(() => response(body));
++      await step();
++      expect(records.at(-1)).toMatchObject({
++        status: "failed",
++        bodyPresent: false,
++        stages: [{ mode, status: "failed", httpStatus: null, errorKind: "TypeError" }],
++      });
++    }
++  );
++
++  it("preserves an unclassified fetch TypeError without guessing its cause", async () => {
++    serve(() => {
++      throw new TypeError("fetch failed");
++    });
++    await step();
++    expect(records.at(-1)!.stages).toMatchObject([
++      { status: "failed", httpStatus: null, errorKind: "TypeError" },
++    ]);
++  });
++
++  it("cancels rate-limit waiting without reporting the preceding 429 as the terminal status", async () => {
++    const controller = new AbortController();
++    const reason = new Error("cancel rate-limit wait");
++    vi.mocked(resolveHostMemory).mockImplementation(() => ({
++      cfg: config,
++      bankId: "bank-a",
++      client: new HindsightClient({
++        apiUrl: config.apiUrl,
++        bank: "bank-a",
++        rateLimitPatienceMs: 10000,
++      }),
++    }));
++    const fetch = serve(() => {
++      setTimeout(() => controller.abort(reason), 0);
++      return new Response("limited", { status: 429, headers: { "retry-after": "1" } });
++    });
++    await expect(step(agent(), "wait", 1, controller.signal)).rejects.toBe(reason);
++    expect(records.at(-1)!.stages).toMatchObject([
++      { status: "cancelled", httpStatus: null, errorKind: "cancelled" },
++    ]);
++    expect(fetch).toHaveBeenCalledTimes(1);
++  });
++
++  it("reports an automatic reflect deadline separately from caller cancellation", async () => {
++    config = resolveConfig({ ...config, autoInject: "reflect", reflectTimeoutMs: 1 });
++    serve((url, init) =>
++      url.endsWith("/reflect")
++        ? new Promise<Response>((_resolve, reject) => {
++            init.signal!.addEventListener("abort", () => reject(init.signal!.reason), {
++              once: true,
++            });
++          })
++        : response({ results: [] })
++    );
++    await step();
++    expect(records.at(-1)).toMatchObject({
++      status: "failed",
++      interruption: null,
++      stages: [
++        { mode: "reflect", status: "failed", httpStatus: null, errorKind: "timeout" },
++        { mode: "pages", status: "empty" },
++        { mode: "recall", status: "empty" },
++      ],
++    });
++  });
++
++  it("isolates concurrent workspace scopes and returns no body scope to unrelated requests", async () => {
++    let release!: () => void;
++    const gate = new Promise<void>((resolve) => {
++      release = resolve;
++    });
++    const scopes: { sessionId: string; bank: string }[] = [];
++    vi.stubGlobal(
++      "fetch",
++      vi.fn(async (url: string) => {
++        if (url.endsWith("/pages/tree")) {
++          expect(runtime.queryScope()).toBeUndefined();
++          return response({ roots: [] });
++        }
++        const before = runtime.queryScope()!;
++        await gate;
++        expect(runtime.queryScope()).toEqual(before);
++        scopes.push({ sessionId: before.sessionId, bank: url });
++        return response({ results: [{ text: "fact" }] });
++      })
++    );
++    configs.set("/workspace-b", resolveConfig({ ...config, bankId: "bank-b" }));
++    const a = agent(),
++      b = agent("/workspace-b");
++    const work = Promise.all([step(a), step(b)]);
++    expect(runtime.queryScope()).toBeUndefined();
++    release();
++    await work;
++    expect(scopes).toEqual(
++      expect.arrayContaining([
++        { sessionId: a.session.header.id, bank: expect.stringContaining("/banks/bank-a/") },
++        { sessionId: b.session.header.id, bank: expect.stringContaining("/banks/bank-b/") },
++      ])
++    );
++  });
++});
++
++it("preserves ordinary client error types when no observation was requested", async () => {
++  serve(() => response({ detail: "unavailable" }, 503));
++  const client = new HindsightClient({ apiUrl: "http://memory.internal", bank: "test" });
++  await expect(client.recallObservations("query", { timeoutMs: 1000 })).rejects.toMatchObject({
++    name: "Error",
++  });
++  await expect(
++    client.recallObservations("query", { timeoutMs: 1000, onResponse: () => {} })
++  ).rejects.toBeInstanceOf(HttpResponseError);
++});
+--- /dev/null
++++ b/hindsight-integrations/coding-agents/src/dsh-policy.ts
+@@ -0,0 +1,7 @@
++import { readFileSync } from "node:fs";
++import type { RawConfig } from "./core/config";
++
++/** Both this source module and the flat dist entrypoint sit one level below package root. */
++export function readDshPolicy(): RawConfig {
++  return JSON.parse(readFileSync(new URL("../dsh-memory.config.json", import.meta.url), "utf8"));
++}
+--- a/hindsight-integrations/coding-agents/src/dsh.test.ts
++++ b/hindsight-integrations/coding-agents/src/dsh.test.ts
+@@ -13,6 +13,9 @@
+ const session = (id: string, extra: Record<string, unknown> = {}) => ({
+   header: { id, cwd: "/repo", ...extra },
+   events: [] as unknown[],
++  snapshotEvents() {
++    return this.events;
++  },
+ });
+ 
+ const agentWith = (id: string, extra: Record<string, unknown> = {}) =>
+@@ -48,11 +51,15 @@
+     const hooks = createDshHooks(() => fakeWorkspace(core));
+ 
+     const decision = await hooks.preStep(
+-      { agent: agentWith("s-1"), signal: new AbortController().signal },
++      { agent: agentWith("s-1"), signal: new AbortController().signal, turn: 1 },
+       enter([userMessage("why did we roll back?"), pluginMessage("Current runtime context…")])
+     );
+ 
+-    expect(core.onPrompt).toHaveBeenCalledWith("s-1", "why did we roll back?");
++    expect(core.onPrompt).toHaveBeenCalledWith(
++      "s-1",
++      "why did we roll back?",
++      expect.any(AbortSignal)
++    );
+     expect(decision.kind).toBe("enter");
+     const appended = (decision as { messages: Record<string, any>[] }).messages.at(-1)!;
+     expect(appended).toMatchObject({
+@@ -65,7 +72,7 @@
+     expect(appended.id).toEqual(expect.any(String));
+   });
+ 
+-  it("does not re-append a block identical to the last one the history carries", async () => {
++  it("delivers fresh retrieval again even when identical context remains in history", async () => {
+     // dsh keeps every injected message in the history it sends, so the same roster appended on
+     // every turn stacked up as N identical copies (#5026).
+     let block = "<hindsight_page_refresh>roster</hindsight_page_refresh>";
+@@ -82,7 +89,7 @@
+       if (events) agent.session.events = events;
+       agents.set(id, agent);
+       const decision = (await hooks.preStep(
+-        { agent: agent as never, signal: new AbortController().signal },
++        { agent: agent as never, signal: new AbortController().signal, turn: 1 },
+         enter([userMessage(text)])
+       )) as { messages: unknown[] };
+       for (const data of decision.messages)
+@@ -91,14 +98,14 @@
+     };
+ 
+     expect(await step("s-1", "first")).toHaveLength(2);
+-    expect(await step("s-1", "second")).toHaveLength(1);
++    expect(await step("s-1", "second")).toHaveLength(2);
+     // Another session gets its own copy.
+     expect(await step("s-2", "first")).toHaveLength(2);
+     // A fork inherits the parent's history, block included, under a NEW session id (#5940).
+-    expect(await step("s-fork", "first", [...agents.get("s-1")!.session.events])).toHaveLength(1);
++    expect(await step("s-fork", "first", [...agents.get("s-1")!.session.events])).toHaveLength(2);
+     // A restart rebuilds the plugin with nothing in memory, but the history still has the block.
+     hooks = createDshHooks(() => fakeWorkspace(core));
+-    expect(await step("s-1", "after restart")).toHaveLength(1);
++    expect(await step("s-1", "after restart")).toHaveLength(2);
+     // A changed block is injected again.
+     block = "<hindsight_page_refresh>new page</hindsight_page_refresh>";
+     expect(await step("s-1", "third")).toHaveLength(2);
+@@ -113,7 +120,7 @@
+     const hooks = createDshHooks(() => fakeWorkspace(core));
+ 
+     const decision = await hooks.preStep(
+-      { agent: agentWith("s-1"), signal: new AbortController().signal },
++      { agent: agentWith("s-1"), signal: new AbortController().signal, turn: 1 },
+       enter([pluginMessage("Current runtime context…")])
+     );
+ 
+@@ -126,12 +133,12 @@
+     const hooks = createDshHooks(() => fakeWorkspace(core));
+ 
+     const rejected = await hooks.preStep(
+-      { agent: agentWith("s-1"), signal: new AbortController().signal },
++      { agent: agentWith("s-1"), signal: new AbortController().signal, turn: 1 },
+       async () => ({ kind: "reject" }) as never
+     );
+     const aborted = AbortSignal.abort();
+     const cancelled = await hooks.preStep(
+-      { agent: agentWith("s-1"), signal: aborted },
++      { agent: agentWith("s-1"), signal: aborted, turn: 1 },
+       enter([userMessage("hello")])
+     );
+ 
+@@ -143,7 +150,7 @@
+   it("passes the step through untouched when memory is off for the workspace", async () => {
+     const hooks = createDshHooks(() => undefined);
+     const decision = await hooks.preStep(
+-      { agent: agentWith("s-1"), signal: new AbortController().signal },
++      { agent: agentWith("s-1"), signal: new AbortController().signal, turn: 1 },
+       enter([userMessage("hello")])
+     );
+     expect((decision as { messages: unknown[] }).messages).toHaveLength(1);
+@@ -236,18 +243,6 @@
+         timestamp: "2026-09-05T08:00:01.000Z",
+       },
+     ]);
+-  });
+-
+-  it("falls back to the legacy events property when snapshotEvents is missing", () => {
+-    const session = { events: sampleEvents };
+-    expect(dshSessionEvents(session)).toBe(sampleEvents);
+-    expect(readDshEvents(dshSessionEvents(session))).toHaveLength(2);
+-  });
+-
+-  it("returns an empty log when neither accessor exists (pre-fix alpha.4 breakage)", () => {
+-    const session = {};
+-    expect(dshSessionEvents(session)).toEqual([]);
+-    expect(readDshEvents(dshSessionEvents(session))).toEqual([]);
+   });
+ 
+   it("prefers snapshotEvents over a stale events property", () => {
+--- a/hindsight-integrations/coding-agents/src/dsh.ts
++++ b/hindsight-integrations/coding-agents/src/dsh.ts
+@@ -7,7 +7,7 @@
+  * install (neither bridge ships in a default profile) while losing the transcript, the session id
+  * and the awaited stop boundary.
+  *
+- *   agent/session-start  -> RuntimeCore.seedIfCold      (cold-check + background git/codebase seed)
++ *   agent/created        -> RuntimeCore.seedIfCold      (cold-check + background git/codebase seed)
+  *   agent/pre-step       -> RuntimeCore.onPrompt        (recall) + the injection as a sourced message
+  *   agent/turn-stopping  -> RuntimeCore.onSessionIdle   (write-back of the completed exchange)
+  *   ctx.tools            -> the hindsight_* page suite, registered natively
+@@ -22,14 +22,27 @@
+  * builder (see `toDshParameters`). So there is no dsh package for pnpm to resolve inside a profile,
+  * and no version to keep in step — any dsh whose event names still match can load this file.
+  */
++import { AsyncLocalStorage } from "node:async_hooks";
+ import { randomUUID } from "node:crypto";
+ import { resolveHostMemory } from "./core/host-client";
+ import { diag } from "./core/diag";
+-import type { ToolSpec } from "./core/page-tools";
+-import { log } from "./core/log";
++import { buildPageTools, type ToolSpec } from "./core/page-tools";
+ import { RuntimeCore } from "./core/runtime";
+ import { HINDSIGHT_PLUGIN, readDshEvents, type DshSessionEvent } from "./core/transcript-dsh";
+ 
++import {
++  describeRuntime,
++  OBSERVATION_PROTOCOL,
++  OBSERVATION_EVENT,
++  RUNTIME_SERVICE,
++  RecallObservation,
++  type RecallRecord,
++  type RuntimeInspection,
++  type QueryScope,
++} from "./core/runtime-observation";
++
++export { describeRuntime } from "./core/runtime-observation";
++
+ const HARNESS = "dsh";
+ 
+ /** Cordis plugin name (loader diagnostics, and the `source.plugin` on everything we inject). */
+@@ -42,13 +55,8 @@
+ 
+ interface DshSession {
+   readonly header: { readonly id: string; readonly cwd?: string; readonly origin?: string };
+-  /**
+-   * Legacy in-memory event log. Present on DeepSeek Harness < alpha.4; removed in alpha.4+.
+-   * Prefer {@link snapshotEvents} when available.
+-   */
+-  readonly events?: readonly DshSessionEvent[];
+   /** Public accessor on DeepSeek Harness alpha.4+ (replaces the removed `events` property). */
+-  snapshotEvents?(): readonly DshSessionEvent[];
++  snapshotEvents(): readonly DshSessionEvent[];
+   /** How many leading events a FORK copied from its parent (`session/fork`); 0 or absent otherwise.
+    *  Persisted with the session, so it survives a restart. */
+   readonly inheritedEventCount?: number;
+@@ -62,25 +70,31 @@
+ interface DshUserMessage {
+   role: "user";
+   content: { type: string; text?: string }[];
+-  source: { kind: string; form?: string };
++  source: {
++    kind: string;
++    form?: string;
++    hindsight?: Pick<QueryScope, "ownerTurn" | "recallId"> & {
++      protocolVersion: 1;
++      bodyPresent: boolean;
++    };
++  };
+   id?: string;
+ }
+ 
+ type PreStepDecision =
+-  | { kind: "enter"; messages: DshUserMessage[] }
++  | { kind: "enter"; messages: DshUserMessage[]; [key: string]: unknown }
+   | { kind: "reject"; [key: string]: unknown };
+ 
+ interface PreStepPayload {
+   agent: DshAgent;
+   signal: AbortSignal;
++  turn: number;
++  step?: number;
+ }
+ 
+ /** The Cordis context surface this plugin uses. */
+ interface DshContext {
+-  on(
+-    event: "agent/session-start",
+-    listener: (payload: { agent: DshAgent }) => void
+-  ): (() => void) | void;
++  on(event: "agent/created", listener: (payload: { agent: DshAgent }) => void): (() => void) | void;
+   on(
+     event: "agent/pre-step",
+     listener: (
+@@ -98,11 +112,17 @@
+     listener: (payload: { agent: DshAgent }) => void
+   ): (() => void) | void;
+   inject(names: string[], callback: (ctx: DshToolContext) => void): void;
++  effect(callback: () => () => Promise<void>): void;
++  provide(name: typeof RUNTIME_SERVICE, runtime: ReturnType<typeof createDshRuntime>): void;
++  emit(name: typeof OBSERVATION_EVENT, payload: { agent: DshAgent; record: RecallRecord }): void;
+ }
+ 
+ interface DshToolContext {
+   tools: {
+-    register(definition: unknown): void;
++    register(
++      definition: unknown,
++      options: { when: (payload: { agent: DshAgent }) => boolean }
++    ): void;
+     /** Registry introspection; used only to log what the host ended up exposing. */
+     schemas?(): { name: string }[];
+   };
+@@ -111,6 +131,7 @@
+ /** `exec` as a dsh tool body receives it (only the caller matters to us). */
+ interface DshToolRunContext {
+   readonly agent?: DshAgent;
++  readonly signal?: AbortSignal;
+ }
+ 
+ // ── per-workspace runtime cache ─────────────────────────────────────────────────
+@@ -123,25 +144,11 @@
+   tools?: ToolSpec[];
+ }
+ 
+-/** `null` caches "memory is off for this repo" so a disabled bank isn't re-derived every turn. */
+-const workspaces = new Map<string, Workspace | null>();
+-/**
+- * sessionId -> agent, so a core's transcript source (which only receives the id) can read the live
+- * log back on stop. `agent/disposed` is what bounds it: an agent holds its whole session log, so
+- * dropping the entry when the host disposes the agent is what keeps a long-lived Web server from
+- * pinning every session it ever opened.
+- */
+-const liveAgents = new Map<string, DshAgent>();
+-
+-/**
+- * Prefer `session.snapshotEvents()` (DeepSeek Harness alpha.4+); fall back to the legacy
+- * `session.events` property so older hosts keep working. Missing both yields an empty log —
+- * which is exactly the alpha.4 breakage when callers still read `events` alone.
+- */
++/** The supported DSH session snapshot API; no legacy event-property fallback. */
+ export function dshSessionEvents(
+-  session: Pick<DshSession, "snapshotEvents" | "events">
++  session: Pick<DshSession, "snapshotEvents">
+ ): readonly DshSessionEvent[] {
+-  return session.snapshotEvents?.() ?? session.events ?? [];
++  return session.snapshotEvents();
+ }
+ 
+ /**
+@@ -149,10 +156,10 @@
+  * turns (#5940): the prefix it inherited is the parent's conversation, which the parent already
+  * stores, and the child's first write-back used to send all of it again under its own document,
+  * re-extracting history the bank already held. The full log is still what the model sees, so
+- * everything else (the injection dedupe below) reads `dshSessionEvents`.
++ * the transcript source therefore preserves this fork boundary.
+  */
+ export function ownEvents(
+-  session: Pick<DshSession, "snapshotEvents" | "events" | "inheritedEventCount">
++  session: Pick<DshSession, "snapshotEvents" | "inheritedEventCount">
+ ): readonly DshSessionEvent[] {
+   return dshSessionEvents(session).slice(session.inheritedEventCount ?? 0);
+ }
+@@ -160,59 +167,6 @@
+ /** Where a session is working. dsh records it on the session header; a session without one is rare. */
+ function workspaceRoot(agent: DshAgent): string {
+   return agent.session.header.cwd || process.cwd();
+-}
+-
+-/**
+- * The memory runtime for one workspace root, built on first use.
+- *
+- * Bank derivation and the per-bank opt-out live here rather than in `apply`, because the plugin
+- * loads before any session exists and the process may end up serving several unrelated
+- * repositories. Building one has NO side effect: the seed is started by `ensureSeeded` when a
+- * session actually opens, so merely registering the tools never seeds the launch directory.
+- */
+-function workspaceFor(root: string): Workspace | undefined {
+-  const cached = workspaces.get(root);
+-  if (cached !== undefined) return cached ?? undefined;
+-
+-  // One shared builder for every long-lived host (core/host-client.ts): the global switch, the
+-  // per-bank opt-out and `optInOnly` all land in `cfg.disabled`.
+-  const { cfg, bankId, client } = resolveHostMemory(HARNESS, root);
+-  if (cfg.disabled) {
+-    workspaces.set(root, null); // inert: same agent, no memory (baseline parity)
+-    return undefined;
+-  }
+-  // The 5th argument is this host's whole reason for existing here: RuntimeCore binds the
+-  // page tools (and retain stamps) to the workspace it is given, and dsh's process cwd is the
+-  // launch directory, routinely a different repository from the session's.
+-  const core = new RuntimeCore(client, bankId, cfg, HARNESS, root);
+-  // The write-back path reads the log back off the live agent — dsh keeps the whole session in
+-  // memory, so unlike opencode there is nothing to refetch over HTTP.
+-  core.setTranscriptSource(async (sessionId) => {
+-    const agent = liveAgents.get(sessionId);
+-    return agent ? readDshEvents(ownEvents(agent.session)) : [];
+-  });
+-  const workspace: Workspace = { core, root };
+-  workspaces.set(root, workspace);
+-  return workspace;
+-}
+-
+-/**
+- * Start this repo's cold-check + background seed once.
+- *
+- * Fire-and-forget by design: `agent/session-start` is an emit that no extension point awaits, and
+- * the Web UI must not wait on a network round-trip to open a session. Nothing the first prompt
+- * needs comes from here — it builds its own pages preamble from that session's page list.
+- */
+-function ensureSeeded(workspace: Workspace): void {
+-  workspace.seeded ??= workspace.core.seedIfCold(workspace.root);
+-}
+-
+-function workspaceForAgent(agent: DshAgent): Workspace | undefined {
+-  // A subagent session is a child of a conversation we already track: injecting into it would pay
+-  // for a second recall per delegation, and retaining it would file a fragment of a session that
+-  // the parent already stores in full.
+-  if (agent.session.header.origin === "subagent") return undefined;
+-  return workspaceFor(workspaceRoot(agent));
+ }
+ 
+ // ── message helpers ─────────────────────────────────────────────────────────────
+@@ -243,33 +197,26 @@
+  * messages to use a producer-owned source kind; `plugin:hindsight` is the canonical fallback name
+  * for an unregistered plugin. The non-user source also keeps the block out of a write-back.
+  */
+-function injectionMessage(text: string): DshUserMessage {
++function injectionMessage(text: string, record?: RecallRecord): DshUserMessage {
+   return {
+     id: randomUUID(),
+     role: "user",
+     content: [{ type: "text", text }],
+-    source: { kind: `plugin:${HINDSIGHT_PLUGIN}`, form: "recall" },
++    source: {
++      kind: `plugin:${HINDSIGHT_PLUGIN}`,
++      form: "recall",
++      ...(record
++        ? {
++            hindsight: {
++              protocolVersion: OBSERVATION_PROTOCOL,
++              ownerTurn: record.ownerTurn,
++              recallId: record.recallId,
++              bodyPresent: record.bodyPresent!,
++            },
++          }
++        : {}),
++    },
+   };
+-}
+-
+-/**
+- * The text of the last memory block this session's history carries, if any.
+- *
+- * dsh keeps every injected message in the history it sends, so re-appending an unchanged block (the
+- * per-turn roster) only stacks identical copies (#5026). This used to be remembered in a map keyed
+- * by session id, which a fork (new id, inherited history) and a restart (empty map) both reset while
+- * the block was still in the history — so the next unchanged recall appended a second copy (#5940).
+- * Reading it off the history itself is what the model will actually see.
+- */
+-export function lastInjectedText(events: readonly DshSessionEvent[]): string | undefined {
+-  for (let i = events.length - 1; i >= 0; i--) {
+-    const event = events[i];
+-    if (event?.type !== "user/message") continue;
+-    const message = event.data as Partial<DshUserMessage> | undefined;
+-    if (message?.source?.kind !== `plugin:${HINDSIGHT_PLUGIN}`) continue;
+-    return (message.content ?? []).map((block) => block.text ?? "").join("\n");
+-  }
+-  return undefined;
+ }
+ 
+ // ── the lifecycle, testable without a dsh host ──────────────────────────────────
+@@ -278,7 +225,17 @@
+  * The three lifecycle handlers, over an injectable workspace resolver. `apply` binds these to the
+  * real Cordis events; the tests drive them with a stand-in agent and core.
+  */
+-export function createDshHooks(resolve: (agent: DshAgent) => Workspace | undefined) {
++interface DshObserver {
++  inspect(agent?: DshAgent): RuntimeInspection;
++  run(scope: QueryScope, callback: () => Promise<void>): Promise<void>;
++  report(payload: { agent: DshAgent; record: RecallRecord }): void;
++}
++
++export function createDshHooks(
++  resolve: (agent: DshAgent) => Workspace | undefined,
++  liveAgents = new Map<string, DshAgent>(),
++  observer?: DshObserver
++) {
+   return {
+     sessionStart({ agent }: { agent: DshAgent }): void {
+       const workspace = resolve(agent);
+@@ -288,34 +245,69 @@
+     },
+ 
+     async preStep(
+-      { agent, signal }: PreStepPayload,
++      { agent, signal, turn }: PreStepPayload,
+       next: () => Promise<PreStepDecision>
+     ): Promise<PreStepDecision> {
+       const decision = await next();
+       if (decision.kind !== "enter" || signal.aborted) return decision;
+       const workspace = resolve(agent);
+-      if (!workspace) return decision;
+       const sessionId = agent.session.header.id;
+-      liveAgents.set(sessionId, agent);
+-      // A resumed session gets no `agent/session-start` in some compositions; seeding here too
+-      // keeps the cold-check exactly-once without depending on which events a host fired.
+-      ensureSeeded(workspace);
+-      // No new human input means a tool continuation: recall already ran for this turn, and its
+-      // block is already in the history the model is about to be sent.
++      if (workspace) {
++        liveAgents.set(sessionId, agent);
++        ensureSeeded(workspace);
++      }
++      // A tool continuation has no new human text, so it owns no retrieval record.
+       const prompt = promptOf(decision.messages);
+       if (!prompt) return decision;
+-      await workspace.core.onPrompt(sessionId, prompt);
++      const scope: QueryScope = { sessionId, ownerTurn: turn, recallId: randomUUID() };
++      const observation = observer
++        ? new RecallObservation(observer.inspect(agent), scope, signal, (callback) =>
++            observer.run(scope, callback)
++          )
++        : undefined;
++      const report = () => {
++        if (observation) observer!.report({ agent, record: observation.snapshot() });
++      };
++      if (!workspace) {
++        observation?.skip(
++          agent.session.header.origin === "subagent" ? "excluded_subagent" : "workspace_disabled"
++        );
++        if (observation) observation.record.bodyPresent = false;
++        report();
++        return decision;
++      }
++      if (observation?.record.inspection.hooksDisabled) {
++        observation.skip("hooks_disabled");
++        observation.record.bodyPresent = false;
++        report();
++        return decision;
++      }
++      report();
++      try {
++        if (observation) await workspace.core.onPrompt(sessionId, prompt, signal, observation);
++        else await workspace.core.onPrompt(sessionId, prompt, signal);
++        if (signal.aborted) {
++          observation?.interrupted();
++          report();
++          return decision;
++        }
++        report();
++      } catch (error) {
++        observation?.interrupted();
++        report();
++        throw error;
++      }
+       const injection = workspace.core.getInjection(sessionId);
+       if (!injection) {
+         diag(HARNESS, "inject_empty", { session: sessionId });
+         return decision;
+       }
+-      if (injection === lastInjectedText(dshSessionEvents(agent.session))) {
+-        diag(HARNESS, "inject_unchanged", { session: sessionId });
+-        return decision;
+-      }
++      // Earlier context may have been compacted away; each fresh retrieval is delivered.
+       diag(HARNESS, "inject_ok", { session: sessionId, chars: injection.length });
+-      return { kind: "enter", messages: [...decision.messages, injectionMessage(injection)] };
++      return {
++        ...decision,
++        messages: [...decision.messages, injectionMessage(injection, observation?.record)],
++      };
+     },
+ 
+     async turnStopping({ agent }: { agent: DshAgent }): Promise<void> {
+@@ -376,8 +368,12 @@
+ }
+ 
+ /** The tool bodies return MCP-shaped results and never throw; dsh wants a value or a throw. */
+-async function runSpec(spec: ToolSpec, args: Record<string, unknown>): Promise<string> {
+-  const result = await spec.handler(args);
++async function runSpec(
++  spec: ToolSpec,
++  args: Record<string, unknown>,
++  signal?: AbortSignal
++): Promise<string> {
++  const result = await spec.handler(args, signal);
+   const text = (result.content || []).map((block) => block.text).join("\n");
+   // dsh normalizes a thrown tool body into an isError result with this message, which is exactly
+   // what our isError:true means — mapping it any other way would report a failure as a success.
+@@ -392,15 +388,81 @@
+  * every agent — including the Web surface's per-session agent presets. Each call resolves the bank
+  * from the CALLING agent's workspace, because one process serves many repositories.
+  */
+-function registerTools(toolCtx: DshToolContext, fallbackRoot: string): void {
+-  // The registry is populated at plugin load, before any session exists, so the NAMES and schemas
+-  // come from the launch directory's workspace and each call rebinds to its own caller's bank. The
+-  // one consequence: if memory is off for the launch directory specifically (a `banks.<id>`
+-  // opt-out) the tools are absent even for other repositories this process later serves.
+-  const template = workspaceFor(fallbackRoot);
+-  if (!template) return; // memory disabled where this process was launched
+-  for (const spec of specsOf(template)) {
+-    toolCtx.tools.register({
++/** The schema factory never reads a workspace; each handler binds to its calling session. */
++function specsOf(workspace: Workspace): ToolSpec[] {
++  workspace.tools ??= workspace.core.toolSpecs();
++  return workspace.tools;
++}
++
++function ensureSeeded(workspace: Workspace): void {
++  workspace.seeded ??= workspace.core.seedIfCold(workspace.root);
++}
++
++export function createDshRuntime(
++  report?: (payload: { agent: DshAgent; record: RecallRecord }) => void
++) {
++  const retrievalScope = new AsyncLocalStorage<QueryScope>();
++  const workspaces = new Map<string, Workspace | null>();
++  const liveAgents = new Map<string, DshAgent>();
++  let disposed = false;
++  function workspaceFor(root: string): Workspace | undefined {
++    if (disposed) return undefined;
++    const cached = workspaces.get(root);
++    if (cached !== undefined) return cached ?? undefined;
++    const { cfg, bankId, client } = resolveHostMemory(HARNESS, root);
++    if (cfg.disabled) {
++      workspaces.set(root, null);
++      return undefined;
++    }
++    const core = new RuntimeCore(client, bankId, cfg, HARNESS, root);
++    core.setTranscriptSource(async (sessionId) => {
++      const agent = liveAgents.get(sessionId);
++      return agent ? readDshEvents(ownEvents(agent.session)) : [];
++    });
++    const workspace: Workspace = { core, root };
++    workspaces.set(root, workspace);
++    return workspace;
++  }
++  function workspaceForAgent(agent: DshAgent): Workspace | undefined {
++    if (agent.session.header.origin === "subagent") return undefined;
++    return workspaceFor(workspaceRoot(agent));
++  }
++  function inspect(agent?: DshAgent): RuntimeInspection {
++    const inspection: RuntimeInspection = {
++      protocolVersion: OBSERVATION_PROTOCOL,
++      sessionId: agent?.session.header.id ?? null,
++      status: "session_not_active",
++      hooksDisabled: Boolean(process.env.HINDSIGHT_DISABLE_HOOKS),
++      runtime: describeRuntime(),
++      effective: null,
++    };
++    if (!agent) return inspection;
++    if (agent.session.header.origin === "subagent") {
++      inspection.status = "excluded_subagent";
++      return inspection;
++    }
++    // Do not call workspaceFor here: opening a status dialog must not initialize a workspace.
++    const workspace = workspaces.get(workspaceRoot(agent));
++    inspection.status =
++      workspace === undefined
++        ? "workspace_uninitialized"
++        : workspace === null
++          ? "disabled"
++          : "ready";
++    if (workspace) inspection.effective = structuredClone(workspace.core.inspectEffective());
++    return inspection;
++  }
++  const queryScope = (): QueryScope | undefined => retrievalScope.getStore();
++  const hooks = createDshHooks(workspaceForAgent, liveAgents, {
++    inspect,
++    run: (scope, callback) => retrievalScope.run(scope, callback),
++    report: (payload) => report?.(payload),
++  });
++  function toolDefinitions(root?: string) {
++    const template = root === undefined ? undefined : workspaceFor(root);
++    if (root !== undefined && !template) return [];
++    const specs = template ? specsOf(template) : buildPageTools();
++    return specs.map((spec) => ({
+       name: spec.name,
+       description: spec.description,
+       parameters: toDshParameters(spec),
+@@ -409,50 +471,59 @@
+         render: (_args: unknown, value: string) => [{ type: "text", text: value }],
+       },
+       async execute(args: Record<string, unknown>, exec: DshToolRunContext): Promise<string> {
+-        // Bind to the caller's repository, not to whichever workspace happened to load first.
+-        const workspace = exec?.agent ? workspaceForAgent(exec.agent) : template;
+-        if (!workspace) return "Hindsight memory is disabled for this workspace.";
+-        const bound = specsOf(workspace).find((candidate) => candidate.name === spec.name);
+-        if (!bound) return `Hindsight tool ${spec.name} is unavailable.`;
+-        return runSpec(bound, args);
++        const workspace = exec.agent
++          ? workspaceForAgent(exec.agent)
++          : root === undefined
++            ? undefined
++            : workspaceFor(root);
++        if (!workspace) throw new Error("Hindsight memory is disabled for this workspace.");
++        const bound = specsOf(workspace).find((candidate) => candidate.name === spec.name)!;
++        return runSpec(bound, args, exec.signal);
+       },
++    }));
++  }
++  async function refresh(): Promise<void> {
++    const old = [...workspaces.values()];
++    workspaces.clear();
++    await Promise.all(old.map((workspace) => workspace?.core.flush()));
++  }
++  async function dispose(): Promise<void> {
++    disposed = true;
++    liveAgents.clear();
++    await refresh();
++  }
++  return {
++    hooks,
++    toolDefinitions,
++    workspaceFor,
++    workspaceForAgent,
++    refresh,
++    dispose,
++    inspect,
++    queryScope,
++  };
++}
++
++function registerTools(
++  toolCtx: DshToolContext,
++  runtime: ReturnType<typeof createDshRuntime>
++): void {
++  for (const definition of runtime.toolDefinitions()) {
++    toolCtx.tools.register(definition, {
++      when: ({ agent }) => runtime.workspaceForAgent(agent) !== undefined,
+     });
+   }
+-  // Log what the HOST sees, not just what we handed it: a tool that registers cleanly but never
+-  // reaches a model is the failure mode worth catching, and this is the one line that shows it.
+-  const exposed = toolCtx.tools.schemas?.() ?? [];
+-  log.debug(HARNESS, "tools registered", {
+-    count: specsOf(template).length,
+-    hostCatalog: exposed.length,
+-    hindsight: exposed.filter((schema) => schema.name?.startsWith("hindsight_")).length,
+-  });
+-}
+-
+-/** The tool specs for one workspace, built once (each closes over that bank's client and root). */
+-function specsOf(workspace: Workspace): ToolSpec[] {
+-  workspace.tools ??= workspace.core.toolSpecs();
+-  return workspace.tools;
+-}
+-
+-// ── cordis entrypoint ───────────────────────────────────────────────────────────
+-
+-/**
+- * Bind the memory lifecycle for the lifetime of `ctx`. Every listener is fail-open: RuntimeCore
+- * never throws, and a workspace we cannot resolve simply leaves that session unmemoried.
+- */
++}
++
+ export function apply(ctx: DshContext): void {
+-  const hooks = createDshHooks(workspaceForAgent);
+-  ctx.on("agent/session-start", hooks.sessionStart);
+-  // `prepend: true` puts this listener outermost, so the injection is appended AFTER every other
+-  // contributor's messages — the memory block reads last, closest to the model's turn.
+-  ctx.on("agent/pre-step", hooks.preStep, { prepend: true });
+-  ctx.on("agent/turn-stopping", hooks.turnStopping);
+-  ctx.on("agent/disposed", hooks.disposed);
+-  // The tools registry is optional: a composition without it (a bare headless assembly) still gets
+-  // recall, injection and write-back.
+-  ctx.inject(["tools"], (toolCtx) => {
+-    registerTools(toolCtx, process.cwd());
+-  });
++  const runtime = createDshRuntime((payload) => ctx.emit(OBSERVATION_EVENT, payload));
++  ctx.provide(RUNTIME_SERVICE, runtime);
++  ctx.on("agent/created", runtime.hooks.sessionStart);
++  ctx.on("agent/pre-step", runtime.hooks.preStep, { prepend: true });
++  ctx.on("agent/turn-stopping", runtime.hooks.turnStopping);
++  ctx.on("agent/disposed", runtime.hooks.disposed);
++  ctx.inject(["tools"], (toolCtx) => registerTools(toolCtx, runtime));
++  ctx.effect(() => () => runtime.dispose());
+ }
+ 
+ export default { name, inject, apply };
+--- a/hindsight-integrations/coding-agents/src/mcp-server.ts
++++ b/hindsight-integrations/coding-agents/src/mcp-server.ts
+@@ -120,7 +120,7 @@
+         inputSchema: tool.inputSchema,
+         annotations: tool.annotations,
+       },
+-      tool.handler
++      (args, extra) => tool.handler(args, extra.signal)
+     );
+   }
+   return server;
+--- /dev/null
++++ b/hindsight-integrations/coding-agents/tests/dsh-observability.test.mjs
+@@ -0,0 +1,222 @@
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { after, test } from "node:test";
++
++const directory = mkdtempSync(join(tmpdir(), "hindsight-delivery-test-"));
++const configPath = join(directory, "coding-agent.json");
++const workspace = join(directory, "workspace");
++mkdirSync(workspace);
++const previous = new Map(
++  Object.entries(process.env).filter(([name]) => name.startsWith("HINDSIGHT_"))
++);
++for (const name of previous.keys()) delete process.env[name];
++// Existing upstream inputs only isolate these tests from the user's files.
++Object.assign(process.env, {
++  HINDSIGHT_CONFIG: configPath,
++  HINDSIGHT_LOG_FILE: join(directory, "plugin.log"),
++  HINDSIGHT_DIAG_FILE: join(directory, "diagnostics.jsonl"),
++  HINDSIGHT_USAGE_FILE: join(directory, "usage.jsonl"),
++});
++const adapter = await import("../dist/dsh.js");
++const declaration = JSON.parse(readFileSync(new URL("../dsh-enhancement.json", import.meta.url)));
++const originalFetch = globalThis.fetch;
++after(() => {
++  globalThis.fetch = originalFetch;
++  for (const name of Object.keys(process.env).filter((name) => name.startsWith("HINDSIGHT_")))
++    delete process.env[name];
++  for (const [name, value] of previous) process.env[name] = value;
++  rmSync(directory, { recursive: true, force: true });
++});
++
++function fixture(t, options = {}) {
++  writeFileSync(
++    configPath,
++    JSON.stringify({
++      serverMode: "self-hosted",
++      apiUrl: "http://memory.invalid",
++      bankId: "delivery-test",
++      autoInject: "recall",
++      autoInjectEveryTurns: 1,
++      autoSeed: false,
++      autoUpdate: false,
++      retainSessions: false,
++      ...options,
++    })
++  );
++  const reports = [];
++  const requests = [];
++  const unexpected = [];
++  const responses = {
++    recall: () => Response.json({ results: [{ text: "  remembered fact  " }, { text: " " }] }),
++    pages: () => Response.json({ results: [] }),
++    reflect: () => Response.json({ text: "a synthesis" }),
++    tree: () => Response.json({ roots: [] }),
++  };
++  const runtime = adapter.createDshRuntime(({ record }) => reports.push(record));
++  globalThis.fetch = async (input, init = {}) => {
++    const url = new URL(input);
++    assert.equal(url.origin, "http://memory.invalid");
++    requests.push({
++      path: url.pathname,
++      scope: runtime.queryScope(),
++      body: init.body ? JSON.parse(init.body) : null,
++    });
++    if (url.pathname.endsWith("/memories/recall")) return responses.recall(init);
++    if (url.pathname.endsWith("/pages/search")) return responses.pages(init);
++    if (url.pathname.endsWith("/reflect")) return responses.reflect(init);
++    if (url.pathname.endsWith("/pages/tree")) return responses.tree(init);
++    unexpected.push(url.pathname);
++    throw new Error(`Unexpected request: ${url.pathname}`);
++  };
++  const id = randomUUID();
++  const events = [];
++  const agent = {
++    session: { header: { id, cwd: workspace, origin: "user" }, snapshotEvents: () => events },
++  };
++  let turn = 0;
++  t.after(async () => {
++    await runtime.dispose();
++    rmSync(join(tmpdir(), "hindsight-dsh", `${id}.json`), { force: true });
++    assert.deepEqual(unexpected, []);
++  });
++  return {
++    runtime,
++    agent,
++    reports,
++    requests,
++    responses,
++    prepare() {
++      runtime.workspaceFor(workspace).seeded = Promise.resolve();
++    },
++    async prompt(text = "a question", signal = new AbortController().signal) {
++      const decision = {
++        kind: "enter",
++        startsRequestSeries: true,
++        messages: [
++          {
++            id: randomUUID(),
++            role: "user",
++            source: { kind: "user" },
++            content: [{ type: "text", text }],
++          },
++        ],
++      };
++      const result = await runtime.hooks.preStep(
++        { agent, turn: ++turn, signal },
++        async () => decision
++      );
++      for (const message of result.messages) events.push({ type: "user/message", data: message });
++      return result;
++    },
++  };
++}
++
++test("the installed declaration matches executing code; inspection does not initialize a workspace", async (t) => {
++  const f = fixture(t);
++  const cold = f.runtime.inspect(undefined);
++  assert.equal(cold.status, "session_not_active");
++  assert.equal(cold.effective, null);
++  assert.equal(cold.runtime.upstreamVersion, declaration.upstream.version);
++  assert.equal(cold.runtime.patchSetVersion, declaration.patchSetVersion);
++  assert.deepEqual(cold.runtime.capabilities, declaration.capabilities);
++  assert.equal(f.runtime.inspect(f.agent).status, "workspace_uninitialized");
++  assert.equal(f.requests.length, 0);
++  f.prepare();
++  assert.equal(f.runtime.inspect(f.agent).effective.bankId, "delivery-test");
++  writeFileSync(
++    configPath,
++    JSON.stringify({
++      serverMode: "self-hosted",
++      apiUrl: "http://changed.invalid",
++      bankId: "changed",
++    })
++  );
++  assert.equal(f.runtime.inspect(f.agent).effective.bankId, "delivery-test");
++  assert.equal(f.requests.length, 0);
++});
++
++test("recall reports usable results and correlates only its body requests and prepared message", async (t) => {
++  const f = fixture(t);
++  f.prepare();
++  const result = await f.prompt();
++  const record = f.reports.at(-1);
++  assert.equal(record.status, "completed");
++  assert.equal(record.ownerTurn, 1);
++  assert.deepEqual(record.stages[0].result, { unit: "memories", count: 1 });
++  assert.equal(record.stages[0].httpStatus, 200);
++  assert.equal(record.bodyPresent, true);
++  assert.ok(record.totalDurationMs >= 0);
++  const message = result.messages.find((message) => message.source.kind === "plugin:hindsight");
++  assert.equal(message.source.hindsight.recallId, record.recallId);
++  assert.equal(message.source.hindsight.bodyPresent, true);
++  assert.equal(result.startsRequestSeries, true);
++  assert.ok(!JSON.stringify(f.reports).includes("remembered fact"));
++  assert.equal(
++    f.requests.find(({ path }) => path.endsWith("/memories/recall")).scope.recallId,
++    record.recallId
++  );
++  assert.equal(f.requests.find(({ path }) => path.endsWith("/pages/tree")).scope, undefined);
++  const count = f.reports.length;
++  const continuation = { kind: "enter", messages: [] };
++  await f.runtime.hooks.preStep(
++    { agent: f.agent, turn: 1, signal: new AbortController().signal },
++    async () => continuation
++  );
++  assert.equal(f.reports.length, count);
++});
++
++test("HTTP 404 remains distinct from a successful empty response", async (t) => {
++  const f = fixture(t);
++  f.prepare();
++  f.responses.recall = () => Response.json({ detail: "Bank not found" }, { status: 404 });
++  await f.prompt("first");
++  assert.equal(f.reports.at(-1).status, "failed");
++  assert.equal(f.reports.at(-1).stages[0].status, "not_found");
++  assert.equal(f.reports.at(-1).stages[0].result, null);
++  f.responses.recall = () => Response.json({ results: [] });
++  await f.prompt("second");
++  assert.equal(f.reports.at(-1).status, "empty");
++  assert.equal(f.reports.at(-1).stages[0].result.count, 0);
++});
++
++test("reflect fallback reports one logical chain with the final usable result", async (t) => {
++  const f = fixture(t, { autoInject: "reflect" });
++  f.prepare();
++  f.responses.reflect = () => Response.json({ error: "temporarily unavailable" }, { status: 503 });
++  await f.prompt();
++  const record = f.reports.at(-1);
++  assert.equal(record.status, "completed");
++  assert.equal(record.degraded, true);
++  assert.deepEqual(
++    record.stages.map(({ mode, status }) => [mode, status]),
++    [
++      ["reflect", "failed"],
++      ["pages", "empty"],
++      ["recall", "completed"],
++    ]
++  );
++  assert.equal(record.bodyPresent, true);
++});
++
++test("disabling recall still permits the first-turn directory without claiming memory content", async (t) => {
++  const f = fixture(t, { autoInject: "none" });
++  f.prepare();
++  const result = await f.prompt();
++  const record = f.reports.at(-1);
++  assert.equal(record.status, "skipped");
++  assert.equal(record.skipReason, "mode_none");
++  assert.equal(record.bodyPresent, false);
++  assert.equal(record.totalDurationMs, null);
++  assert.equal(
++    result.messages.find((message) => message.source.kind === "plugin:hindsight").source.hindsight
++      .bodyPresent,
++    false
++  );
++  assert.equal(
++    f.requests.some(({ path }) => path.endsWith("/memories/recall")),
++    false
++  );
++});

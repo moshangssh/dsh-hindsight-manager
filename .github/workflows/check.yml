@@ -28,3 +28,20 @@ jobs:
         run: |
           npm run check
           npm test
+      - name: Verify the supported runtime delivery
+        run: |
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import { mkdtempSync, readFileSync } from 'node:fs';
+          import { tmpdir } from 'node:os';
+          import { join, resolve } from 'node:path';
+          const { supportedEnhancement: { upstream } } = JSON.parse(readFileSync('manager.config.json'));
+          const directory = mkdtempSync(join(tmpdir(), 'hindsight-runtime-ci-'));
+          const packed = JSON.parse(execFileSync('npm', ['pack', `${upstream.name}@${upstream.version}`,
+            '--ignore-scripts', '--json', '--pack-destination', directory], { encoding: 'utf8' }));
+          execFileSync('tar', ['-xzf', join(directory, packed[0].filename), '-C', directory]);
+          const runtime = join(directory, 'package');
+          execFileSync('git', ['-C', runtime, 'apply', resolve('runtime-patches', upstream.version, 'delivery.patch')]);
+          execFileSync('npm', ['--prefix', runtime, 'run', 'test:dsh'], { stdio: 'inherit' });
+          execFileSync('npm', ['run', 'test:runtime', '--', runtime], { stdio: 'inherit' });
+          JS

@@ -16,6 +16,7 @@ window.__ModuleLoader__.load({
       test: '/plugins/dsh-hindsight-manager/test',
       banks: '/plugins/dsh-hindsight-manager/banks',
       save: '/plugins/dsh-hindsight-manager/save',
+      runtime: '/plugins/dsh-hindsight-manager/runtime',
     };
 
     // -- i18n -----------------------------------------------------------------
@@ -131,6 +132,73 @@ window.__ModuleLoader__.load({
       syncMemory: '同步项目记忆',
       surveyMemory: '提交项目研究',
       memoryService: '访问记忆服务',
+      runtimeTitle: 'Hindsight 当前会话状态',
+      runtimeError: '读取运行状态失败',
+      runtimeReadAt: '读取时间',
+      runtimeLiveNote: '这里显示当前运行实例。保存设置后请重启 DSH；历史活动中的配置表示当时使用的值。',
+      runtime_runtime_unavailable: '当前运行时未提供状态接口',
+      runtime_agent_service_unavailable: '当前无法查询活跃会话',
+      runtime_session_not_active: '当前会话未激活',
+      runtime_excluded_subagent: '当前子会话不执行自动记忆',
+      runtime_workspace_uninitialized: '当前工作区尚未初始化',
+      runtime_disabled: '当前工作区未启用记忆',
+      runtime_ready: '当前工作区已初始化',
+      runtimeVersion: '已加载上游版本',
+      patchVersion: '增强版本',
+      capabilities: '已加载能力',
+      capability_autoInjectEveryTurns: '按用户回合召回',
+      capability_runtimeInspection: '运行状态查询',
+      capability_recallSummary: '召回摘要',
+      capability_injectionCorrelation: '正文提交关联',
+      hooks: '自动召回与回写 hooks',
+      hooksDisabled: '已停用；配置开关仍显示实例原值',
+      hooksEnabled: '已启用',
+      enabled: '开启',
+      disabled: '关闭',
+      unknown: '未知',
+      unavailable: '不可用',
+      close: '关闭',
+      frequency_initial: '首次召回（空结果或失败可能重试）',
+      frequency_every: '每个用户回合',
+      frequency_interval: '用户回合间隔',
+      recallDetails: '本轮召回',
+      recallConfiguration: '本次实际配置',
+      recall_running: '正在召回',
+      recall_completed: '召回完成',
+      recall_empty: '召回结果为空',
+      recall_failed: '召回失败',
+      recall_cancelled: '召回已取消',
+      recall_skipped: '未执行检索',
+      recall_degraded: '召回已降级完成',
+      recall_submitted: '上下文已提交',
+      stage_completed: '完成',
+      stage_empty: '空结果',
+      stage_not_found: '未找到资源（404，原因未确认）',
+      stage_unavailable: '接口不可用',
+      stage_failed: '失败',
+      stage_cancelled: '已取消',
+      result_memories: '条可用记忆',
+      result_pages: '个页面',
+      result_characters: '字符合成文本',
+      duration: '正文检索耗时',
+      durationUnknown: '正文检索耗时未知',
+      retrievalNotLoaded: '检索详情未加载',
+      body: '记忆正文',
+      bodyCommitted: '已进入上下文',
+      directoryCommitted: '仅提交目录／工具说明',
+      bodyPending: '已准备，待确认提交',
+      noCommit: '未看到提交记录',
+      bodyAbsent: '未构造记忆正文',
+      bodyUnknown: '正文组装结果未知',
+      preparation_cancelled: '准备阶段已取消',
+      preparation_failed: '准备阶段失败',
+      skip_mode_none: '自动召回已关闭',
+      skip_deferred_new_bank: '新记忆库，检索已延后',
+      skip_cached_decision: '沿用已有召回决策',
+      skip_hooks_disabled: '自动召回与回写 hooks 已停用',
+      skip_workspace_disabled: '当前工作区未启用记忆',
+      skip_excluded_subagent: '当前子会话不执行自动记忆',
+      skip_no_user_text: '没有可检索的用户文本',
     };
 
     const en = {
@@ -244,6 +312,73 @@ window.__ModuleLoader__.load({
       syncMemory: 'Sync project memory',
       surveyMemory: 'Submit project survey',
       memoryService: 'Access memory service',
+      runtimeTitle: 'Hindsight current session state',
+      runtimeError: 'Failed to read runtime state',
+      runtimeReadAt: 'Read at',
+      runtimeLiveNote: 'Shows the current running instance. Restart DSH after saving settings; configurations in historical activity describe the values used then.',
+      runtime_runtime_unavailable: 'The current runtime does not provide a state interface',
+      runtime_agent_service_unavailable: 'Active sessions cannot currently be queried',
+      runtime_session_not_active: 'This session is not active',
+      runtime_excluded_subagent: 'Automatic memory is excluded for this subagent',
+      runtime_workspace_uninitialized: 'This workspace has not been initialized',
+      runtime_disabled: 'Memory is disabled for this workspace',
+      runtime_ready: 'This workspace is initialized',
+      runtimeVersion: 'Loaded upstream version',
+      patchVersion: 'Enhancement version',
+      capabilities: 'Loaded capabilities',
+      capability_autoInjectEveryTurns: 'Recall by user turn',
+      capability_runtimeInspection: 'Runtime inspection',
+      capability_recallSummary: 'Recall summary',
+      capability_injectionCorrelation: 'Context submission correlation',
+      hooks: 'Automatic recall and write-back hooks',
+      hooksDisabled: 'Disabled; configuration switches still show the instance values',
+      hooksEnabled: 'Enabled',
+      enabled: 'On',
+      disabled: 'Off',
+      unknown: 'Unknown',
+      unavailable: 'Unavailable',
+      close: 'Close',
+      frequency_initial: 'Initial recall (empty results or failures may retry)',
+      frequency_every: 'Every user turn',
+      frequency_interval: 'User turn interval',
+      recallDetails: 'Recall in this turn',
+      recallConfiguration: 'Configuration used for this recall',
+      recall_running: 'Recalling',
+      recall_completed: 'Recall completed',
+      recall_empty: 'Recall returned no results',
+      recall_failed: 'Recall failed',
+      recall_cancelled: 'Recall cancelled',
+      recall_skipped: 'Retrieval skipped',
+      recall_degraded: 'Recall completed after fallback',
+      recall_submitted: 'Context submitted',
+      stage_completed: 'Completed',
+      stage_empty: 'Empty result',
+      stage_not_found: 'Resource not found (404, cause unconfirmed)',
+      stage_unavailable: 'Endpoint unavailable',
+      stage_failed: 'Failed',
+      stage_cancelled: 'Cancelled',
+      result_memories: 'usable memories',
+      result_pages: 'pages',
+      result_characters: 'characters of synthesized text',
+      duration: 'Content retrieval time',
+      durationUnknown: 'Content retrieval time unknown',
+      retrievalNotLoaded: 'Retrieval details not loaded',
+      body: 'Memory content',
+      bodyCommitted: 'Submitted to context',
+      directoryCommitted: 'Only directory / tool guidance submitted',
+      bodyPending: 'Prepared, awaiting submission confirmation',
+      noCommit: 'No submission record observed',
+      bodyAbsent: 'No memory content prepared',
+      bodyUnknown: 'Content preparation result unknown',
+      preparation_cancelled: 'Preparation cancelled',
+      preparation_failed: 'Preparation failed',
+      skip_mode_none: 'Automatic recall is off',
+      skip_deferred_new_bank: 'Retrieval deferred for a new bank',
+      skip_cached_decision: 'Using the existing recall decision',
+      skip_hooks_disabled: 'Automatic recall and write-back hooks are disabled',
+      skip_workspace_disabled: 'Memory is disabled for this workspace',
+      skip_excluded_subagent: 'Automatic memory is excluded for this subagent',
+      skip_no_user_text: 'No user text to retrieve against',
     };
 
     // -- styles ---------------------------------------------------------------
@@ -285,17 +420,41 @@ window.__ModuleLoader__.load({
 .hm-activity[data-status="failed"] summary { color:var(--dsw-alias-state-error-primary); }
 .hm-activity ul { list-style:none; margin:6px 0 0; padding:0 0 0 20px; }
 .hm-activity li { display:flex; flex-wrap:wrap; gap:6px; }
+.hm-runtime-dialog { width:min(620px, calc(100vw - 40px)); max-height:calc(100vh - 48px); box-sizing:border-box; overflow:auto; padding:20px; border:1px solid var(--dsh-border, #e3e3e3); border-radius:10px; background:var(--dsh-bg, #fff); color:var(--dsw-alias-label-primary, #242424); }
+.hm-runtime-dialog::backdrop { background:rgba(0,0,0,.35); }
+.hm-runtime-title { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:14px; }
+.hm-values { display:grid; grid-template-columns:minmax(110px, auto) minmax(0, 1fr); gap:5px 14px; font-size:12px; line-height:1.6; }
+.hm-values dt { color:var(--dsh-text-secondary, #6b6b6b); }
+.hm-values dd { margin:0; overflow-wrap:anywhere; white-space:pre-wrap; }
+.hm-recall { margin:10px 0 8px 20px; border-left:2px solid var(--dsh-border, #e3e3e3); padding-left:12px; }
+.hm-recall p { margin:4px 0; }
+.hm-recall ol { margin:6px 0; padding-left:20px; }
+.hm-recall li { display:list-item; }
 @media (max-width:720px){ .hm-item { grid-template-columns:1fr; } }
 `;
 
     // Each activity record carries its originating turn, including writes that
     // finish after turn/end. The same definition replays after a page reload.
     const ACTIVITY_EVENT = 'plugin:dsh-hindsight-manager/activity';
+    const RECALL_EVENT = 'plugin:dsh-hindsight-manager/recall';
+    const OBSERVATION_PROTOCOL = 1;
     const ACTIVITY_KIND = 'hindsight-activity';
 
     function updateActivity(state, { event }) {
       if (event.type === 'turn/start') return state;
       if (event.type === 'turn/end') return { ...state, endSeq: event.seq };
+      if (event.type === RECALL_EVENT || event.type === 'user/message') {
+        const record = event.type === RECALL_EVENT ? event.data : null;
+        const submission = event.type === 'user/message' ? event.data.source.hindsight : null;
+        const id = (record ?? submission).recallId;
+        const recalls = [...state.recalls];
+        const index = recalls.findIndex((item) => item.id === id);
+        const item = index === -1 ? { id, record: null, submission: null } : recalls[index];
+        const updated = { ...item, ...(record === null ? { submission } : { record }) };
+        if (index === -1) recalls.push(updated);
+        else recalls[index] = updated;
+        return { ...state, observed: true, recalls, anchorSeq: event.seq };
+      }
       const operation = event.data.operation;
       const operations = [...state.operations];
       if (operation !== null) {
@@ -311,27 +470,36 @@ window.__ModuleLoader__.load({
       target: 'chat',
       match: {
         [ACTIVITY_EVENT]: (event) => ({ id: String(event.data.ownerTurn), role: 'start' }),
+        [RECALL_EVENT]: (event) => event.data.protocolVersion === OBSERVATION_PROTOCOL
+          ? { id: String(event.data.ownerTurn), role: 'start' } : null,
+        'user/message': (event) => event.data.source?.kind === 'plugin:hindsight'
+          && event.data.source.hindsight?.protocolVersion === OBSERVATION_PROTOCOL
+          ? { id: String(event.data.source.hindsight.ownerTurn), role: 'start' } : null,
         'turn/start': (event) => ({ id: String(event.data.turn), role: 'start' }),
         'turn/end': (event) => ({ id: String(event.data.turn), role: 'start' }),
       },
       start: (_context, match) => updateActivity({
         observed: false,
-        turn: match.event.type === ACTIVITY_EVENT ? match.event.data.ownerTurn : match.event.data.turn,
+        turn: Number(match.event.type === 'user/message' ? match.event.data.source.hindsight.ownerTurn
+          : [ACTIVITY_EVENT, RECALL_EVENT].includes(match.event.type) ? match.event.data.ownerTurn : match.event.data.turn),
         operations: [],
+        recalls: [],
         anchorSeq: match.event.seq,
         endSeq: null,
       }, match),
       update: (context, match) => updateActivity(context.state, match),
       buildViewNode: (context) => {
         const state = context.state;
-        if (!state.observed || (state.endSeq === null && state.operations.length === 0)) return null;
+        if (!state.observed || (state.endSeq === null && state.operations.length === 0 && state.recalls.length === 0)) return null;
         return {
           key: context.key,
           kind: ACTIVITY_KIND,
           id: context.id,
           target: 'chat',
           anchorSeq: state.endSeq ?? state.anchorSeq,
-          location: (context.matches.find(({ event }) => event.type === 'turn/start' || event.type === 'turn/end') ?? context.matches[0]).location,
+          location: (context.matches.find(({ event }) => event.type === 'turn/start' || event.type === 'turn/end')
+            ?? context.matches.find(({ location }) => (location.kind === 'turn' || location.kind === 'step') && location.turn.turn === state.turn)
+            ?? context.matches[0]).location,
           groupTree: 'turn',
           visibility: 'visible',
           data: state,
@@ -339,21 +507,138 @@ window.__ModuleLoader__.load({
       },
     };
 
+    const displayValue = (value, t) => value === undefined ? t('unknown') : JSON.stringify(value);
+    const milliseconds = (value) => `${Math.round(value)} ms`;
+    const frequency = (value, t) => value === null ? t('unknown') : value === 0 ? t('frequency_initial') : value === 1 ? t('frequency_every')
+      : `${t('frequency_interval')}: ${value}`;
+
+    function Inspection({ inspection, t }) {
+      const { runtime, effective, hooksDisabled } = inspection;
+      const rows = [[t('status'), t(`runtime_${inspection.status}`)]];
+      if (runtime !== null) {
+        rows.push([t('runtimeVersion'), runtime.upstreamVersion], [t('patchVersion'), runtime.patchSetVersion]);
+        rows.push([t('capabilities'), Object.entries(runtime.capabilities)
+          .map(([name, supported]) => `${t(`capability_${name}`)}: ${t(supported ? 'enabled' : 'disabled')}`).join('\n')]);
+      }
+      if (hooksDisabled !== null) rows.push([t('hooks'), t(hooksDisabled ? 'hooksDisabled' : 'hooksEnabled')]);
+      if (effective !== null) rows.push(
+        [t('dir'), effective.workspaceRoot],
+        [t('bank'), effective.bankId],
+        [t('apiUrl'), effective.apiUrl],
+        [t('autoInject'), t(`mode_${effective.autoInject}`)],
+        [t('autoInjectEveryTurns'), frequency(effective.autoInjectEveryTurns, t)],
+        [t('retainSessions'), t(effective.retainSessions ? 'enabled' : 'disabled')],
+        [t('injectTimeoutMs'), String(effective.injectTimeoutMs)],
+        [t('recallOptions'), displayValue(effective.recallOptions, t)],
+      );
+      return h('dl', { className: 'hm-values' }, rows.flatMap(([label, value]) => [
+        h('dt', { key: `${label}:label` }, label), h('dd', { key: label }, value),
+      ]));
+    }
+
+    function recallLabel(record) {
+      return record.status === 'completed' && record.degraded ? 'recall_degraded' : `recall_${record.status}`;
+    }
+
+    function Recall({ item, t }) {
+      const { record, submission } = item;
+      const body = submission !== null
+        ? t(submission.bodyPresent ? 'bodyCommitted' : 'directoryCommitted')
+        : record.bodyPresent === true ? `${t('bodyPending')} · ${t('noCommit')}`
+          : `${t(record.bodyPresent === false ? 'bodyAbsent' : 'bodyUnknown')} · ${t('noCommit')}`;
+      return h('section', { className: 'hm-recall', key: item.id, 'aria-label': t('recallDetails') },
+        h('p', null, h('strong', null, record === null ? t('retrievalNotLoaded') : t(recallLabel(record))),
+          record !== null && record.totalDurationMs !== null ? ` · ${milliseconds(record.totalDurationMs)}` : null),
+        record === null ? null : h('div', null,
+          h('details', null, h('summary', null, t('recallConfiguration')), Inspection({ inspection: record.inspection, t })),
+          record.skipReason === null ? null : h('p', null, t(`skip_${record.skipReason}`)),
+          record.totalDurationMs === null && record.status !== 'skipped' ? h('p', null, t('durationUnknown')) : null,
+          h('ol', null, record.stages.map((stage, index) => h('li', { key: index },
+            `${t(`mode_${stage.mode}`)} · ${t(`stage_${stage.status}`)} · ${milliseconds(stage.durationMs)}`,
+            stage.result === null ? null : ` · ${stage.result.count} ${t(`result_${stage.result.unit}`)}`,
+            stage.httpStatus === null ? null : ` · HTTP ${stage.httpStatus}`,
+            stage.errorKind === null ? null : ` · ${stage.errorKind}`))),
+          record.interruption === null ? null : h('p', null, t(`preparation_${record.interruption.kind}`))),
+        h('p', null, `${t('body')}: ${body}`));
+    }
+
     function Activity({ node, t }) {
-      const { operations } = node.data;
-      if (operations.length === 0) {
+      const { operations, recalls } = node.data;
+      if (operations.length === 0 && recalls.length === 0) {
         return h('div', { className: 'hm-activity', 'data-status': 'unused' }, `Hindsight · ${t('activityUnused')}`);
       }
-      const status = operations.some((item) => item.status === 'running') ? 'running'
-        : operations.some((item) => item.status === 'failed') ? 'failed' : 'called';
-      const label = { running: 'activityRunning', failed: 'activityFailed', called: 'activityCalled' }[status];
+      const records = recalls.flatMap((item) => item.record === null ? [] : [item.record]);
+      const status = operations.some((item) => item.status === 'running') || records.some((item) => item.status === 'running') ? 'running'
+        : operations.some((item) => item.status === 'failed') || records.some((item) => item.status === 'failed' || item.interruption?.kind === 'failed') ? 'failed' : 'called';
+      let label = { running: 'activityRunning', failed: 'activityFailed', called: 'activityCalled' }[status];
+      if (status === 'called' && recalls.length > 0) {
+        if (records.some((item) => item.status === 'completed' && item.degraded)) label = 'recall_degraded';
+        else if (records.some((item) => item.status === 'completed')) label = 'recall_completed';
+        else if (operations.length === 0) {
+          if (records.some((item) => item.status === 'cancelled')) label = 'recall_cancelled';
+          else if (records.some((item) => item.status === 'empty')) label = 'recall_empty';
+          else if (records.length > 0) label = 'recall_skipped';
+          else label = 'recall_submitted';
+        }
+      }
       return h('details', { className: 'hm-activity', 'data-status': status },
         h('summary', null, h('span', { 'aria-hidden': true }, '🧠 '),
           h('span', { role: 'status' }, `Hindsight · ${t(label)}`)),
+        recalls.map((item) => Recall({ item, t })),
         h('ul', null, operations.map((item) => h('li', { key: item.id },
           h('span', null, item.action.startsWith('hindsight_') ? item.action : t(item.action)),
           h('span', null, `· ${t(item.status)}`)))),
       );
+    }
+
+    function RuntimeStatus({ sessionId, t }) {
+      const [open, setOpen] = useState(false);
+      const [revision, setRevision] = useState(0);
+      const [query, setQuery] = useState(null);
+      const dialog = useRef(null);
+
+      useEffect(() => {
+        if (open) dialog.current.showModal();
+        else dialog.current.close();
+      }, [open]);
+
+      useEffect(() => {
+        if (!open) return;
+        const controller = new AbortController();
+        setQuery(null);
+        const read = async () => {
+          try {
+            const response = await fetch(`${ROUTES.runtime}?sessionId=${encodeURIComponent(sessionId)}`, {
+              credentials: 'same-origin', signal: controller.signal,
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const inspection = await response.json();
+            if (!controller.signal.aborted) setQuery({ sessionId, inspection, error: null, readAt: new Date() });
+          } catch (error) {
+            if (!controller.signal.aborted) setQuery({ sessionId, inspection: null, error: error.message, readAt: null });
+          }
+        };
+        read();
+        return () => controller.abort();
+      }, [open, sessionId, revision]);
+
+      const current = query?.sessionId === sessionId ? query : null;
+      return h('div', null,
+        h('button', { className: 'hm-btn', type: 'button', 'aria-haspopup': 'dialog',
+          'aria-label': t('runtimeTitle'), onClick: () => setOpen(true) }, 'Hindsight'),
+        h('dialog', { ref: dialog, className: 'hm-runtime-dialog', 'aria-label': t('runtimeTitle'),
+          onClose: () => setOpen(false) },
+          h('div', { className: 'hm-runtime-title' }, h('h2', { className: 'hm-h' }, t('runtimeTitle')),
+            h('button', { className: 'hm-btn', type: 'button', onClick: () => setOpen(false) }, t('close'))),
+          h('p', { className: 'hm-sub' }, t('runtimeLiveNote')),
+          current === null ? h('p', { role: 'status' }, t('loading'))
+            : current.error !== null ? h('p', { role: 'alert' }, `${t('runtimeError')}: ${current.error}`)
+              : Inspection({ inspection: current.inspection, t }),
+          h('div', { className: 'hm-row' },
+            h('button', { className: 'hm-btn', type: 'button', disabled: current === null,
+              onClick: () => setRevision((value) => value + 1) }, t('reload')),
+            current?.readAt ? h('span', { className: 'hm-sub' }, `${t('runtimeReadAt')}: `,
+              h('time', { dateTime: current.readAt.toISOString() }, current.readAt.toLocaleString())) : null)));
     }
 
     // -- page -----------------------------------------------------------------
@@ -930,6 +1215,11 @@ window.__ModuleLoader__.load({
           key: ACTIVITY_KIND,
           inject: () => ({ t }),
         }, Activity));
+        owner.slots.inject('conversation.session.header.utilities', () => owner.slots.register({
+          name: 'conversation.session.header.utilities',
+          id: 'hindsight-runtime-status',
+          inject: () => ({ t }),
+        }, RuntimeStatus));
       });
 
       ctx.slots.inject('settings.section', () =>

@@ -22,7 +22,7 @@ test('packed bundle imports in DSH without the source checkout or local peer lin
     const packed = join(temp, 'package');
     const manifest = JSON.parse(readFileSync(join(packed, 'package.json'), 'utf8'));
     assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml');
-    assert.equal(manifest.version, '0.4.0');
+    assert.equal(manifest.version, '0.5.0');
     assert.equal(manifest.engines.dsh, '0.2.2-rc.1');
     assert.equal(existsSync(join(packed, 'node_modules')), false);
     assert.equal(existsSync(join(packed, 'vendor')), false);
@@ -34,9 +34,14 @@ test('packed bundle imports in DSH without the source checkout or local peer lin
     for (const file of ['README.md', '0001-dsh-compatibility.patch', '0002-active-memory.patch', '0003-review-fixes.patch', '0004-enhancement-declaration.patch']) {
       assert.ok(existsSync(join(packed, 'runtime-patches', file)), `${file} must ship for offline use`);
     }
+    for (const file of ['source.patch', 'delivery.patch']) {
+      assert.ok(existsSync(join(packed, 'runtime-patches/0.8.8', file)), `${file} must ship for the latest supported runtime`);
+    }
     assert.equal(manifest.scripts['test:runtime'], 'node scripts/test-runtime.mjs');
     assert.ok(existsSync(join(packed, 'scripts/test-runtime.mjs')));
     assert.ok(existsSync(join(packed, 'tests/runtime/settings.test.mjs')));
+    assert.ok(existsSync(join(packed, 'tests/runtime/observations.test.mjs')));
+    assert.ok(existsSync(join(packed, 'tests/host-modules.mjs')));
     assert.ok(existsSync(join(packed, 'tests/fixtures/api-contract-1.2.3.json')));
     assert.equal(existsSync(join(packed, 'dsh-enhancement.json')), false, 'the declaration belongs to the patched official package');
     await assert.rejects(run(process.execPath, ['scripts/test-runtime.mjs'], {

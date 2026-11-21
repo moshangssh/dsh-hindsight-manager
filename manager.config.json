@@ -8,9 +8,9 @@
   "supportedEnhancement": {
     "upstream": {
       "name": "@vectorize-io/hindsight-coding-agents",
-      "version": "0.8.7"
+      "version": "0.8.8"
     },
-    "patchSetVersion": "1",
+    "patchSetVersion": "2",
     "defaultsFile": "dsh-memory.config.json"
   },
   "bankListLimit": 100,

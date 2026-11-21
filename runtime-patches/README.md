@@ -1,63 +1,47 @@
-# 每轮主动召回的运行时补丁
+# 最新官方运行时的 DSH 增强
 
-这组补丁将本地验证过的主动记忆改动保存在管理器仓库中，应用对象是
-`@vectorize-io/hindsight-coding-agents` **0.8.7** 的发布目录，已验证宿主为
-DSH **0.2.2-rc.1**。管理器仍负责设置；补丁修改的是官方插件的 DSH 运行时。
-只更新管理器不会自动应用补丁，也不会改变官方插件的召回频率。
+当前交付对应 `@vectorize-io/hindsight-coding-agents` **0.8.8**，宿主为 DSH **0.2.2-rc.1**。
+官方包继续执行记忆检索与保存；管理器通过公开的只读服务和观测事件显示实际运行状态。
 
-## 行为
+`0.8.8/source.patch` 是针对上游发布源码的维护补丁，`0.8.8/delivery.patch` 是通过构建生成、
+针对同版本 npm 发布包的离线补丁。根目录旧四份补丁仅属于 0.8.7，不能与当前补丁混用。
 
-1. 每次用户发来消息，按当前问题检索 Hindsight，在模型回答前注入结果。
-2. 同一轮中执行工具的后续步骤不重复召回。
-3. 回复结束后自动保存对话，由 Hindsight 异步提取、归纳记忆。
-4. 后续回合和新会话继续检索；空库或上次请求失败不会关闭后续召回。
-5. 即使结果与上一轮相同，也重新注入，避免旧记忆被上下文压缩移除后缺失。
+## 包含的行为
 
-记忆范围由已有 bank 配置决定。检索采用同步调用，会增加一次查询耗时；新写入的内容
-需要服务端处理完成后才能被检索。自动保存排除插件注入的记忆文本。
+- DSH 生命周期、工作区实例隔离、请求取消、工具注册和会话回写修复。
+- 按用户消息执行主动召回；工具续步不重复，同一结果在下一次实际检索后仍可重新注入。
+- 回复结束后提交会话，由服务端异步提取记忆；注入内容排除在回写之外。
+- 只读运行时状态：当前工作区、最终 bank、服务地址、实际配置、加载版本。
+- 逐次召回摘要：模式、各阶段结果、耗时、失败或降级；以宿主提交消息确认记忆正文进入上下文。
 
-## 补丁内容
+运行状态查询不创建工作区、不激活历史会话。摘要不增加 Hindsight 请求，不记录查询与记忆正文，
+不进入模型上下文。实际注入不等于模型采纳。检索完成后准备阶段中断不会覆盖检索结果。
 
-- `0001-dsh-compatibility.patch`：DSH 生命周期、会话工具注册、配置刷新、请求取消和卸载修复，
-  以及这些行为的回归测试。主动记忆改动基于这一版适配器。
-- `0002-active-memory.patch`：每轮召回、根目录参数文件、使用说明、技能说明和主动记忆测试。
-- `0003-review-fixes.patch`：解除工具注册对 DSH 启动目录的依赖，允许失败的会话回写在后续
-  停止事件中重试，并将写入接口的 HTTP 404 正确报告为失败，附带回归测试。
-- `0004-enhancement-declaration.patch`：加入根目录 `dsh-enhancement.json` 及打包条目，
-  声明官方包 0.8.7、补丁集 1 和逐轮召回能力，供管理器关联安装产物。
+## 离线部署
 
-前三份补丁调整 DSH 运行时；第四份只增加交付声明。其他助手的运行时代码保持上游行为。
-
-## 离线应用
-
-先准备官方插件 0.8.7 的完整发布目录、Node.js、DSH 和可访问的 Hindsight 服务。
-以下命令不下载依赖，也不调用真实记忆服务。将路径替换成实际目录：
+先准备官方 **0.8.8** 的完整发布包、Node.js、DSH 和可访问的内网 Hindsight 服务。
+在新目录展开官方包，并应用配套发布补丁：
 
 ```bash
 manager_repo=/absolute/path/to/dsh-hindsight-manager
 hindsight_package=/absolute/path/to/hindsight-coding-agents
 
-git -C "$hindsight_package" apply "$manager_repo/runtime-patches/0001-dsh-compatibility.patch"
-git -C "$hindsight_package" apply "$manager_repo/runtime-patches/0002-active-memory.patch"
-git -C "$hindsight_package" apply "$manager_repo/runtime-patches/0003-review-fixes.patch"
-git -C "$hindsight_package" apply "$manager_repo/runtime-patches/0004-enhancement-declaration.patch"
+git -C "$hindsight_package" apply "$manager_repo/runtime-patches/0.8.8/delivery.patch"
 npm --prefix "$hindsight_package" run test:dsh
 npm --prefix "$manager_repo" run test:runtime -- "$hindsight_package"
 ```
 
-按顺序应用尚未安装的补丁。已有前三份时只追加第四份，已经包含四份时无需再次应用。
-补丁应用到官方包目录。
+上述验证使用模拟 HTTP，不向真实服务写入数据。部署不需要 TypeScript 开发依赖。
+将管理器 `manager.config.json` 中 `officialPackagePath` 设置为 DSH 实际加载的增强包目录，
+安装该本地包并重启 DSH、刷新 Web 页面。只更新管理器不会改变官方运行时。
+已有 0.8.7 增强应更换到准备好的新包目录，保留原有官方用户配置文件；不要在旧目录追加此补丁。
 
-完成后，在管理器根目录 `manager.config.json` 的 `officialPackagePath` 填入 DSH 实际加载的
-这个目录，再重启 DSH。管理器在面板中保存的设置继续写入官方 `coding-agent.json`。
-管理器读取安装声明和默认参数，不注册第二套记忆工具或会话钩子。
+`dsh-enhancement.json` 表示安装产物声明；聊天标题状态窗口通过当前运行实例确认实际加载版本。
+配置按工作区首次使用时缓存。保存配置后需重启 DSH，不能用新会话或磁盘声明推断配置已经生效。
 
-声明只能说明关联产物声明具备该能力，不能证明当前进程已经加载增强。第四份补丁必须与
-前三份一起完成运行时和组合行为验证；只复制声明文件不等于安装了逐轮召回。
+## 根目录参数
 
-## 参数
-
-第二份补丁在**官方插件包根目录**创建 `dsh-memory.config.json`：
+官方增强包的 `dsh-memory.config.json` 提供默认值：
 
 ```json
 {
@@ -74,26 +58,31 @@ npm --prefix "$manager_repo" run test:runtime -- "$hindsight_package"
 }
 ```
 
-`autoInjectEveryTurns: 1` 表示每个用户回合召回；正整数 N 表示第 1、1+N、1+2N 回合召回；
-`0` 使用原来的会话首次召回及其可能重试的逻辑，不表示关闭。
-`autoInject: "none"` 关闭自动检索记忆正文，工具和会话回写由各自配置控制。
+频率 1 表示每次用户消息检索；N 在第 1、1+N、1+2N 次清除缓存；0 保留首次检索及可能重试。
+空结果与失败仍按已有规则重试，因此非到期轮也可能检索。关闭正文检索使用 `autoInject: "none"`。
+工具、页面目录和自动回写各自遵循配置。用户配置顶层、DSH、paths、banks 继续覆盖上述默认值。
+`recallOptions` 在层之间整组替换。新参数不通过环境变量注入。
 
-根目录文件提供 DSH 默认值，`~/.hindsight/coding-agent.json` 的显式字段、`harnesses.dsh`、
-`paths` 和 `banks` 设置继续覆盖它。新增频率参数不通过环境变量注入。
-修改参数后重启 DSH。完整配置优先级和行为说明也写入了官方插件的 README。
-关联增强后，管理器显示这一层默认值；保存只写用户实际修改的 DSH 覆盖，恢复继承会删除覆盖。
-`recallOptions` 在层之间整组替换，具体编辑与恢复规则见管理器 README。
+## 源码维护与上游更新
 
-## 验证与更新
+每次开发及交付前查询最新版本和其源码提交；本次 0.8.8 对应上游发布提交
+`0a7ed29d705d967fe1f759c542842fa3709c3d43`。部署机器继续离线，版本跟进在开发端完成。
 
-补丁附带适配器、请求取消、主动记忆、工具注册和会话回写的回归测试，覆盖换话题、空库后
-新增记忆、跨会话自动保存与召回、取消、频率设置、bank 隔离，以及启动目录未启用记忆、
-写入失败后的重试和 HTTP 404。HTTP 使用模拟响应，不向真实 Hindsight 写入测试内容。
+1. 查询 npm latest、gitHead，并检查 main 中尚未发布的相关差异。
+2. 在该发布源码上移植 `source.patch`，删除上游已经吸收的改动，保留尚未吸收的 DSH 能力。
+3. 在 `hindsight-integrations/coding-agents` 使用本包锁文件准备开发依赖，运行源码测试、类型检查和构建。
+4. 将构建生成的 DSH bundle、根参数、声明及离线测试与同版本完整发布包比较，生成 `delivery.patch`。
+5. 在干净发布包上应用新补丁，运行运行时测试与管理器组合测试，更新管理器支持版本和文档。
 
-管理器的 `test:runtime` 进一步验证当前面板保存到运行时行为的链路，包括两个工作区 bank、
-关闭回写后仍可召回、关闭自动召回后工具与回写独立、切换模式后参数保留、reflect 降级参数和超时。
-常规管理器测试可独立运行；组合验收必须显式提供准备好的运行时目录。
+```bash
+git -C /absolute/path/to/hindsight-source apply /absolute/path/to/manager/runtime-patches/0.8.8/source.patch
+cd /absolute/path/to/hindsight-source/hindsight-integrations/coding-agents
+npm ci
+npm test
+./node_modules/.bin/tsc --noEmit
+npm run build
+```
 
-这组补丁针对发布产物，当前目录不包含上游 TypeScript 构建工程。重新安装或重新构建
-官方插件会覆盖修改；升级上游版本后需要重新核对补丁，不能直接假定适用于其他版本。
-管理器不会在后台下载、更新或重打这些补丁。
+源码补丁是维护依据，不手工修改生成 bundle 来替代源码修改。构建可能输出其他助手的 bundle，
+离线增强只替换 DSH bundle，保留官方其他入口。管理器不会后台下载、更新或重打补丁。
+重新安装官方插件会覆盖本地增强，升级后需要重新准备匹配版本的安装产物。
